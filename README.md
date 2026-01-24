@@ -2,6 +2,9 @@
 
 Deep learning model inference in pure Rust using the [Burn](https://burn.dev) framework.
 
+> [!WARNING]
+> **Experimental** - Development is currently paused. Most model architectures have not been fully tested yet.
+
 ## Features
 
 - **Pure Rust** - No Python dependencies, no ONNX runtime
