@@ -23,6 +23,22 @@ ALWAYS NOTE THINGS DOWN. When you discover something important, write it immedia
 - Framework/library quirk discovered → add to relevant docs/ file
 - "I'll remember this" thought → you won't, write it down now
 
+## Workflow
+
+**Batch cargo commands** to minimize round-trips:
+```bash
+cargo clippy --all-targets --all-features -- -D warnings && cargo test
+```
+After editing multiple files, run the full check once — not after each edit. Formatting is handled automatically by the pre-commit hook (`cargo fmt`).
+
+**When making the same change across multiple crates**, edit all files first, then build once.
+
+**Use `normalize view` for structural exploration:**
+```bash
+~/git/rhizone/normalize/target/debug/normalize view <file>    # outline with line numbers
+~/git/rhizone/normalize/target/debug/normalize view <dir>     # directory structure
+```
+
 ## Commit Convention
 
 Use conventional commits: `type(scope): message`
