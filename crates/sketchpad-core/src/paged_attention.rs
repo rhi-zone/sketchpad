@@ -29,6 +29,8 @@
 use burn::prelude::*;
 use std::collections::VecDeque;
 
+use crate::kv_cache::{AttentionCache, CacheUpdate};
+
 /// Configuration for paged KV cache
 #[derive(Debug, Clone)]
 pub struct PagedKvCacheConfig {
@@ -472,6 +474,86 @@ impl<B: Backend> PagedScheduler<B> {
     /// Available capacity in tokens
     pub fn available_tokens(&self) -> usize {
         self.cache.num_free_blocks() * self.cache.block_size()
+    }
+}
+
+/// Wrapper around `PagedKvCache` that implements the `AttentionCache` trait
+///
+/// Manages its own `BlockTable` internally so the cache can be used through
+/// the unified trait interface without exposing block concepts to the model.
+/// Designed for single-sequence use (batch size 1).
+pub struct PagedAttentionCache<B: Backend> {
+    /// Underlying paged KV cache
+    cache: PagedKvCache<B>,
+    /// Block table for the single managed sequence
+    block_table: BlockTable,
+}
+
+impl<B: Backend> PagedAttentionCache<B> {
+    /// Create a new paged attention cache wrapper
+    pub fn new(config: PagedKvCacheConfig, device: &B::Device) -> Self {
+        let block_size = config.block_size;
+        Self {
+            cache: PagedKvCache::new(config, device),
+            block_table: BlockTable::new(block_size),
+        }
+    }
+
+    /// Ensure enough blocks are allocated for additional tokens
+    fn ensure_capacity(&mut self, additional_tokens: usize) {
+        let new_len = self.block_table.seq_len() + additional_tokens;
+        let blocks_needed = new_len.div_ceil(self.cache.block_size());
+        let current_blocks = self.block_table.num_blocks();
+
+        for _ in current_blocks..blocks_needed {
+            let block_idx = self
+                .cache
+                .allocate_block()
+                .expect("PagedAttentionCache: out of memory");
+            self.block_table.add_block(block_idx);
+        }
+    }
+}
+
+impl<B: Backend> AttentionCache<B> for PagedAttentionCache<B> {
+    fn update_layer(
+        &mut self,
+        layer_idx: usize,
+        k: Tensor<B, 4>,
+        v: Tensor<B, 4>,
+    ) -> CacheUpdate<B> {
+        let [_batch, _heads, new_seq_len, _head_dim] = k.dims();
+        let start_pos = self.block_table.seq_len();
+
+        // Allocate blocks and update seq_len on the first layer only
+        // (all layers share the block table)
+        if layer_idx == 0 {
+            self.ensure_capacity(new_seq_len);
+            self.block_table.increment_seq_len(new_seq_len);
+        }
+
+        // Remove batch dimension for paged cache (expects 3D: [heads, seq, dim])
+        let k_3d = k.squeeze::<3>();
+        let v_3d = v.squeeze::<3>();
+
+        self.cache
+            .store_kv(layer_idx, &self.block_table, k_3d, v_3d, start_pos);
+
+        // Gather full sequence and add batch dimension back
+        let (full_k, full_v) = self.cache.gather_kv(layer_idx, &self.block_table);
+        CacheUpdate {
+            k: full_k.unsqueeze_dim(0),
+            v: full_v.unsqueeze_dim(0),
+        }
+    }
+
+    fn seq_len(&self) -> usize {
+        self.block_table.seq_len()
+    }
+
+    fn clear(&mut self) {
+        self.cache.free_sequence(&self.block_table);
+        self.block_table = BlockTable::new(self.cache.block_size());
     }
 }
 

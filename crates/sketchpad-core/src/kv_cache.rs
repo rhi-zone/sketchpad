@@ -7,6 +7,60 @@
 
 use burn::prelude::*;
 
+/// Result of updating a cache layer with new K/V tensors
+pub struct CacheUpdate<B: Backend> {
+    /// Full key sequence including cached content: [batch, num_kv_heads, total_seq_len, head_dim]
+    pub k: Tensor<B, 4>,
+    /// Full value sequence including cached content: [batch, num_kv_heads, total_seq_len, head_dim]
+    pub v: Tensor<B, 4>,
+}
+
+/// Trait for KV cache strategies used in attention layers
+///
+/// Both the simple concat-based cache and paged attention cache implement this,
+/// allowing models to use either strategy without code changes.
+pub trait AttentionCache<B: Backend> {
+    /// Update cache with new K/V for a specific layer, return full K/V sequence
+    ///
+    /// # Arguments
+    ///
+    /// * `layer_idx` - Index of the transformer layer
+    /// * `k` - New keys [batch, num_kv_heads, new_seq_len, head_dim]
+    /// * `v` - New values [batch, num_kv_heads, new_seq_len, head_dim]
+    fn update_layer(
+        &mut self,
+        layer_idx: usize,
+        k: Tensor<B, 4>,
+        v: Tensor<B, 4>,
+    ) -> CacheUpdate<B>;
+
+    /// Current cached sequence length
+    fn seq_len(&self) -> usize;
+
+    /// Clear all cached state
+    fn clear(&mut self);
+}
+
+impl<B: Backend> AttentionCache<B> for ModelKvCache<B> {
+    fn update_layer(
+        &mut self,
+        layer_idx: usize,
+        k: Tensor<B, 4>,
+        v: Tensor<B, 4>,
+    ) -> CacheUpdate<B> {
+        let (k, v) = self.layer(layer_idx).update(k, v);
+        CacheUpdate { k, v }
+    }
+
+    fn seq_len(&self) -> usize {
+        self.seq_len()
+    }
+
+    fn clear(&mut self) {
+        self.clear();
+    }
+}
+
 /// KV Cache for a single attention layer
 ///
 /// Stores the key and value tensors from previous tokens, allowing

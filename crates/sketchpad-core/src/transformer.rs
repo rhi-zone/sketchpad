@@ -7,6 +7,7 @@ use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
 
 use crate::glu::{SwiGluFfn, SwiGluFfnConfig};
+use crate::kv_cache::{AttentionCache, CacheUpdate};
 use crate::rmsnorm::RmsNorm;
 use crate::rope::RotaryEmbedding;
 
@@ -151,6 +152,78 @@ impl<B: Backend> MultiHeadAttention<B> {
         self.o_proj.forward(out)
     }
 
+    /// Forward pass with KV cache support
+    ///
+    /// Like `forward`, but uses the cache to store/retrieve K and V tensors
+    /// for incremental generation. The cache handles concatenation of new
+    /// tokens with previously cached ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Input tensor [batch, seq_len, hidden_size]
+    /// * `rope` - Optional rotary embeddings
+    /// * `start_pos` - Position offset for RoPE
+    /// * `mask` - Optional attention mask [seq_len, total_seq_len]
+    /// * `cache` - KV cache to update
+    /// * `layer_idx` - Index of this layer in the model
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: Option<&RotaryEmbedding<B>>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        let [batch, seq_len, _hidden] = x.dims();
+
+        // Project to Q, K, V
+        let q = self.q_proj.forward(x.clone());
+        let k = self.k_proj.forward(x.clone());
+        let v = self.v_proj.forward(x);
+
+        // Reshape to [batch, seq_len, num_heads, head_dim]
+        let q = q.reshape([batch, seq_len, self.num_heads, self.head_dim]);
+        let k = k.reshape([batch, seq_len, self.num_kv_heads, self.head_dim]);
+        let v = v.reshape([batch, seq_len, self.num_kv_heads, self.head_dim]);
+
+        // Transpose to [batch, num_heads, seq_len, head_dim]
+        let q = q.swap_dims(1, 2);
+        let k = k.swap_dims(1, 2);
+        let v = v.swap_dims(1, 2);
+
+        // Apply RoPE if provided
+        let (q, k) = match rope {
+            Some(r) => r.forward(q, k, start_pos),
+            None => (q, k),
+        };
+
+        // Update cache and get full K/V sequence
+        let CacheUpdate { k, v } = cache.update_layer(layer_idx, k, v);
+
+        // Repeat KV heads for GQA
+        let k = self.repeat_kv(k);
+        let v = self.repeat_kv(v);
+
+        // Attention: Q is [batch, heads, new_seq, dim], K/V are [batch, heads, total_seq, dim]
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let attn = q.matmul(k.transpose()) * scale;
+
+        let attn = match mask {
+            Some(m) => attn + m.unsqueeze::<3>().unsqueeze(),
+            None => attn,
+        };
+
+        let attn = burn::tensor::activation::softmax(attn, 3);
+        let out = attn.matmul(v);
+
+        // Reshape back: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden]
+        let out = out.swap_dims(1, 2);
+        let out = out.reshape([batch, seq_len, self.num_heads * self.head_dim]);
+
+        self.o_proj.forward(out)
+    }
+
     /// Repeat KV heads for grouped-query attention
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         if self.num_kv_heads == self.num_heads {
@@ -267,6 +340,40 @@ impl<B: Backend> TransformerBlock<B> {
             + self
                 .attention
                 .forward(self.input_norm.forward(x), rope, start_pos, mask);
+
+        // Pre-norm FFN with residual
+        h.clone() + self.ffn.forward(self.post_attention_norm.forward(h))
+    }
+
+    /// Forward pass with KV cache support
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Input tensor [batch, seq_len, hidden_size]
+    /// * `rope` - Optional rotary embeddings
+    /// * `start_pos` - Position offset for KV cache
+    /// * `mask` - Optional attention mask
+    /// * `cache` - KV cache to update
+    /// * `layer_idx` - Index of this layer in the model
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: Option<&RotaryEmbedding<B>>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        // Pre-norm attention with residual (cached)
+        let h = x.clone()
+            + self.attention.forward_cached(
+                self.input_norm.forward(x),
+                rope,
+                start_pos,
+                mask,
+                cache,
+                layer_idx,
+            );
 
         // Pre-norm FFN with residual
         h.clone() + self.ffn.forward(self.post_attention_norm.forward(h))
