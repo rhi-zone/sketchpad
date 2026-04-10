@@ -142,10 +142,9 @@ impl ModelType {
 pub struct GenerationConfig {
     /// Maximum number of tokens to generate
     pub max_tokens: usize,
-    /// Sampling temperature (1.0 = no scaling, lower = more deterministic)
-    pub temperature: f32,
-    /// Top-p (nucleus) sampling threshold
-    pub top_p: f32,
+    /// Sampler configuration (temperature, top-k, top-p, DRY, XTC, etc.)
+    #[serde(skip)]
+    pub sampler: crate::sampling::SamplerConfig,
     /// Stop sequences - generation stops when any of these are produced
     pub stop_sequences: Vec<String>,
 }
@@ -154,8 +153,7 @@ impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
             max_tokens: 256,
-            temperature: 0.7,
-            top_p: 0.9,
+            sampler: crate::sampling::SamplerConfig::default(),
             stop_sequences: Vec::new(),
         }
     }
@@ -172,19 +170,31 @@ impl GenerationConfig {
 
     /// Set the temperature
     pub fn with_temperature(mut self, temperature: f32) -> Self {
-        self.temperature = temperature;
+        self.sampler.temperature = temperature;
         self
     }
 
     /// Set top-p sampling
     pub fn with_top_p(mut self, top_p: f32) -> Self {
-        self.top_p = top_p;
+        self.sampler.top_p = top_p;
+        self
+    }
+
+    /// Set the sampler configuration
+    pub fn with_sampler(mut self, sampler: crate::sampling::SamplerConfig) -> Self {
+        self.sampler = sampler;
         self
     }
 
     /// Add a stop sequence
     pub fn with_stop_sequence(mut self, stop: impl Into<String>) -> Self {
         self.stop_sequences.push(stop.into());
+        self
+    }
+
+    /// Set stop sequences
+    pub fn with_stop_sequences(mut self, stops: Vec<String>) -> Self {
+        self.stop_sequences = stops;
         self
     }
 }
@@ -486,38 +496,66 @@ impl<B: Backend> LlmInstance<B> {
     ) -> Tensor<B, 2, Int> {
         match &self.model {
             ModelInstance::Llama(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Mistral(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Mixtral(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Gemma(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
             ModelInstance::Gemma4(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
-            ModelInstance::Phi(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Qwen(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::DeepSeek(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Rwkv(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Mamba(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
-            ModelInstance::Jamba(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
-            }
+            // Other models still use the legacy temperature-only interface
+            ModelInstance::Mistral(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Mixtral(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Gemma(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Phi(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Qwen(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::DeepSeek(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Rwkv(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Mamba(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
+            ModelInstance::Jamba(model, runtime) => model.generate(
+                input_ids,
+                runtime,
+                config.max_tokens,
+                config.sampler.temperature,
+            ),
         }
     }
 }
@@ -783,8 +821,8 @@ mod tests {
     fn test_generation_config_defaults() {
         let config = GenerationConfig::default();
         assert_eq!(config.max_tokens, 256);
-        assert!((config.temperature - 0.7).abs() < 0.001);
-        assert!((config.top_p - 0.9).abs() < 0.001);
+        assert!((config.sampler.temperature - 0.7).abs() < 0.001);
+        assert!((config.sampler.top_p - 0.9).abs() < 0.001);
     }
 
     #[test]
@@ -795,8 +833,8 @@ mod tests {
             .with_stop_sequence("\n");
 
         assert_eq!(config.max_tokens, 100);
-        assert!((config.temperature - 0.5).abs() < 0.001);
-        assert!((config.top_p - 0.8).abs() < 0.001);
+        assert!((config.sampler.temperature - 0.5).abs() < 0.001);
+        assert!((config.sampler.top_p - 0.8).abs() < 0.001);
         assert_eq!(config.stop_sequences, vec!["\n"]);
     }
 

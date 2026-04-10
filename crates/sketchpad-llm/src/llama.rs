@@ -299,11 +299,15 @@ impl<B: Backend> Llama<B> {
         input_ids: Tensor<B, 2, Int>,
         runtime: &LlamaRuntime<B>,
         max_new_tokens: usize,
-        temperature: f32,
+        sampler: &crate::sampling::SamplerConfig,
     ) -> Tensor<B, 2, Int> {
         let [batch, _prompt_len] = input_ids.dims();
         let mut cache =
             ModelKvCache::<B>::new(runtime.config.num_layers, runtime.config.max_seq_len);
+
+        // Track generated token IDs for repetition/DRY penalties
+        let input_data: Vec<i64> = input_ids.to_data().to_vec().unwrap();
+        let mut context_tokens: Vec<u32> = input_data.iter().map(|&id| id as u32).collect();
 
         // Prefill: process the entire prompt at once
         let output = self.forward(input_ids.clone(), runtime, Some(&mut cache));
@@ -315,8 +319,11 @@ impl<B: Backend> Llama<B> {
             0..runtime.config.vocab_size,
         ]);
         let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
-        let mut next_token = sample_greedy(last_logits, temperature, batch);
+        let token_id = crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+        context_tokens.push(token_id);
 
+        let device = input_ids.device();
+        let mut next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
         let mut all_tokens = Tensor::cat(vec![input_ids, next_token.clone()], 1);
 
         // Decode: generate one token at a time using the cache
@@ -327,29 +334,16 @@ impl<B: Backend> Llama<B> {
                 .logits
                 .slice([0..batch, 0..1, 0..runtime.config.vocab_size]);
             let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
-            next_token = sample_greedy(last_logits, temperature, batch);
+            let token_id =
+                crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+            context_tokens.push(token_id);
 
+            next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
             all_tokens = Tensor::cat(vec![all_tokens, next_token.clone()], 1);
         }
 
         all_tokens
     }
-}
-
-/// Greedy sampling with optional temperature scaling
-///
-/// Returns token indices as [batch, 1] tensor.
-fn sample_greedy<B: Backend>(
-    logits: Tensor<B, 2>,
-    temperature: f32,
-    batch: usize,
-) -> Tensor<B, 2, Int> {
-    let scaled = if (temperature - 1.0).abs() > 1e-6 {
-        logits / temperature
-    } else {
-        logits
-    };
-    scaled.argmax(1).reshape([batch, 1])
 }
 
 /// Creates a causal mask for prefill with cached positions
@@ -402,7 +396,12 @@ mod tests {
         let (model, runtime) = config.init::<TestBackend>(&device);
 
         let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
-        let generated = model.generate(prompt, &runtime, 3, 1.0);
+        let generated = model.generate(
+            prompt,
+            &runtime,
+            3,
+            &crate::sampling::SamplerConfig::greedy(),
+        );
 
         assert_eq!(generated.dims(), [1, 5]); // 2 prompt + 3 generated
     }

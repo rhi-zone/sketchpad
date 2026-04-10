@@ -251,12 +251,10 @@ async fn chat_completions<B: Backend>(
     State(state): State<Arc<ServerState<B>>>,
     Json(request): Json<ChatCompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ErrorResponse> {
-    let config = GenerationConfig {
-        max_tokens: request.max_tokens,
-        temperature: request.temperature,
-        top_p: request.top_p,
-        stop_sequences: request.stop.unwrap_or_default(),
-    };
+    let config = GenerationConfig::new(request.max_tokens)
+        .with_temperature(request.temperature)
+        .with_top_p(request.top_p)
+        .with_stop_sequences(request.stop.unwrap_or_default());
 
     // Convert messages
     let messages: Vec<ChatMessage> = request.messages.into_iter().map(Into::into).collect();
@@ -310,12 +308,10 @@ async fn completions<B: Backend>(
     State(state): State<Arc<ServerState<B>>>,
     Json(request): Json<CompletionRequest>,
 ) -> Result<Json<CompletionResponse>, ErrorResponse> {
-    let config = GenerationConfig {
-        max_tokens: request.max_tokens,
-        temperature: request.temperature,
-        top_p: request.top_p,
-        stop_sequences: request.stop.unwrap_or_default(),
-    };
+    let config = GenerationConfig::new(request.max_tokens)
+        .with_temperature(request.temperature)
+        .with_top_p(request.top_p)
+        .with_stop_sequences(request.stop.unwrap_or_default());
 
     let llm = state.llm.lock().await;
     let response = llm
