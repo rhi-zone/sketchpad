@@ -102,7 +102,7 @@ impl ChatTemplate {
         match model_type {
             ModelType::Llama => Self::Llama,
             ModelType::Mistral | ModelType::Mixtral => Self::Mistral,
-            ModelType::Gemma => Self::Gemma,
+            ModelType::Gemma | ModelType::Gemma4 => Self::Gemma,
             ModelType::Phi => Self::Phi,
             ModelType::Qwen => Self::Qwen,
             ModelType::DeepSeek => Self::ChatMl,

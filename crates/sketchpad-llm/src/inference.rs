@@ -29,6 +29,8 @@ use crate::{
     deepseek_loader::load_deepseek,
     gemma::{Gemma, GemmaConfig, GemmaRuntime},
     gemma_loader::load_gemma,
+    gemma4::{Gemma4, Gemma4Config, Gemma4Runtime},
+    gemma4_loader::load_gemma4,
     jamba::{Jamba, JambaConfig, JambaRuntime},
     jamba_loader::load_jamba,
     llama::{Llama, LlamaConfig, LlamaRuntime},
@@ -78,6 +80,8 @@ pub enum ModelType {
     Mixtral,
     /// Gemma 2
     Gemma,
+    /// Gemma 4 MoE
+    Gemma4,
     /// Phi-2/3
     Phi,
     /// Qwen 1.5/2
@@ -100,7 +104,8 @@ impl std::str::FromStr for ModelType {
             "llama" => Ok(Self::Llama),
             "mistral" => Ok(Self::Mistral),
             "mixtral" => Ok(Self::Mixtral),
-            "gemma" => Ok(Self::Gemma),
+            "gemma" | "gemma2" => Ok(Self::Gemma),
+            "gemma4" => Ok(Self::Gemma4),
             "phi" => Ok(Self::Phi),
             "qwen" => Ok(Self::Qwen),
             "deepseek" => Ok(Self::DeepSeek),
@@ -120,6 +125,7 @@ impl ModelType {
             Self::Mistral => "mistral",
             Self::Mixtral => "mixtral",
             Self::Gemma => "gemma",
+            Self::Gemma4 => "gemma4",
             Self::Phi => "phi",
             Self::Qwen => "qwen",
             Self::DeepSeek => "deepseek",
@@ -188,6 +194,7 @@ enum ModelInstance<B: Backend> {
     Mistral(Mistral<B>, MistralRuntime<B>),
     Mixtral(Mixtral<B>, MixtralRuntime<B>),
     Gemma(Gemma<B>, GemmaRuntime<B>),
+    Gemma4(Gemma4<B>, Gemma4Runtime<B>),
     Phi(Phi<B>, PhiRuntime<B>),
     Qwen(Qwen<B>, QwenRuntime<B>),
     DeepSeek(DeepSeek<B>, DeepSeekRuntime<B>),
@@ -280,6 +287,12 @@ impl<B: Backend> LlmInstance<B> {
                 let (model, runtime) = load_gemma(&safetensors_path, &config, device)
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::Gemma(model, runtime))
+            }
+            ModelType::Gemma4 => {
+                let config = parse_gemma4_config(&config_str)?;
+                let (model, runtime) = load_gemma4(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Gemma4(model, runtime))
             }
             ModelType::Phi => {
                 let config = parse_phi_config(&config_str)?;
@@ -424,6 +437,7 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Mistral(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Mixtral(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Gemma(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Gemma4(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Phi(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Qwen(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::DeepSeek(m, _) => m.embed_tokens.weight.val().device(),
@@ -450,6 +464,9 @@ impl<B: Backend> LlmInstance<B> {
                 model.generate(input_ids, runtime, config.max_tokens, config.temperature)
             }
             ModelInstance::Gemma(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, config.temperature)
+            }
+            ModelInstance::Gemma4(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, config.temperature)
             }
             ModelInstance::Phi(model, runtime) => {
@@ -547,6 +564,47 @@ fn parse_gemma_config(json: &str) -> Result<GemmaConfig, LlmError> {
         final_logit_softcap: v["final_logit_softcapping"].as_f64().unwrap_or(30.0) as f32,
         norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
         rope_base: v["rope_theta"].as_f64().unwrap_or(10000.0) as f32,
+    })
+}
+
+fn parse_gemma4_config(json: &str) -> Result<Gemma4Config, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let num_layers = v["num_hidden_layers"].as_u64().unwrap_or(30) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(32) as usize;
+    let hidden_size = v["hidden_size"].as_u64().unwrap_or(3840) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((hidden_size / num_heads) as u64) as usize;
+
+    // Parse moe_layers from config, defaulting to odd layers
+    let moe_layers = if let Some(arr) = v["moe_layers"].as_array() {
+        arr.iter()
+            .filter_map(|x| x.as_u64().map(|n| n as usize))
+            .collect()
+    } else {
+        (0..num_layers).filter(|i| i % 2 == 1).collect()
+    };
+
+    Ok(Gemma4Config {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(262144) as usize,
+        hidden_size,
+        intermediate_size: v["intermediate_size"].as_u64().unwrap_or(24576) as usize,
+        num_layers,
+        num_heads,
+        num_kv_heads: v["num_key_value_heads"].as_u64().unwrap_or(8) as usize,
+        head_dim,
+        max_seq_len: v["max_position_embeddings"].as_u64().unwrap_or(8192) as usize,
+        sliding_window: v["sliding_window"].as_u64().unwrap_or(1024) as usize,
+        attn_logit_softcap: v["attn_logit_softcapping"].as_f64().unwrap_or(50.0) as f32,
+        final_logit_softcap: v["final_logit_softcapping"].as_f64().unwrap_or(30.0) as f32,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
+        rope_base: v["rope_theta"].as_f64().unwrap_or(1000000.0) as f32,
+        num_experts: v["num_local_experts"].as_u64().unwrap_or(128) as usize,
+        num_shared_experts: v["num_shared_experts"].as_u64().unwrap_or(1) as usize,
+        num_experts_per_tok: v["num_experts_per_tok"].as_u64().unwrap_or(8) as usize,
+        moe_layers,
     })
 }
 

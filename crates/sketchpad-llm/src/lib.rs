@@ -9,6 +9,7 @@
 //! - **Mistral**: Mistral 7B
 //! - **Mixtral**: Mixtral MoE
 //! - **Gemma**: Gemma 2
+//! - **Gemma 4**: Gemma 4 MoE
 //! - **Phi**: Phi-2/3
 //! - **Qwen**: Qwen 1.5/2
 //! - **DeepSeek**: DeepSeek
@@ -59,6 +60,8 @@
 pub mod deepseek;
 pub mod deepseek_loader;
 pub mod gemma;
+pub mod gemma4;
+pub mod gemma4_loader;
 pub mod gemma_loader;
 pub mod jamba;
 pub mod jamba_loader;
@@ -89,6 +92,8 @@ pub use deepseek::{DeepSeek, DeepSeekConfig, DeepSeekOutput, DeepSeekRuntime};
 pub use deepseek_loader::{DeepSeekLoadError, load_deepseek};
 pub use gemma::{Gemma, GemmaConfig, GemmaOutput, GemmaRuntime};
 pub use gemma_loader::{GemmaLoadError, load_gemma};
+pub use gemma4::{Gemma4, Gemma4Config, Gemma4Output, Gemma4Runtime};
+pub use gemma4_loader::{Gemma4LoadError, load_gemma4};
 pub use jamba::{Jamba, JambaConfig, JambaOutput, JambaRuntime, JambaState};
 pub use jamba_loader::{JambaLoadError, load_jamba};
 pub use llama::{Llama, LlamaConfig, LlamaOutput, LlamaRuntime};
