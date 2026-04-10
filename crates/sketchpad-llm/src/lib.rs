@@ -81,6 +81,9 @@ pub mod qwen_loader;
 pub mod rwkv;
 pub mod rwkv_loader;
 
+// Sampling
+pub mod sampling;
+
 // High-level APIs
 pub mod chat;
 pub mod inference;
@@ -112,6 +115,9 @@ pub use qwen::{Qwen, QwenConfig, QwenOutput, QwenRuntime};
 pub use qwen_loader::{QwenLoadError, load_qwen};
 pub use rwkv::{Rwkv, RwkvConfig, RwkvOutput, RwkvRuntime, RwkvState};
 pub use rwkv_loader::{RwkvLoadError, load_rwkv};
+
+// Re-export sampling
+pub use sampling::{SamplerConfig, sample_from_logits, sample_token};
 
 // Re-export high-level APIs
 pub use chat::{ChatMessage, ChatSession, ChatTemplate, Role};
