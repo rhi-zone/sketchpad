@@ -325,6 +325,18 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] Gemma 2 - Google's open models (interleaved sliding/global attention, logit soft-capping, GeGLU)
 - [x] Phi-3/3.5 - Microsoft's small models (fused QKV/gate-up, GQA)
 - [x] DeepSeek V1/V2 - Multi-head Latent Attention (MLA) for compressed KV cache
+- [x] Gemma 4 MoE - 128 routed experts, top-8 routing, shared expert, interleaved attention
+- [x] GGUF format loading - GGUF v3 parser, dequant for Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K
+- [x] Gemma 4 GGUF loader - auto-config from metadata, fused expert tensor splitting
+- [x] Sampler pipeline - DRY, XTC, repetition penalty, temperature, top-k, top-p, min-p
+- [x] KV cache for LLaMA (prefill+decode with ModelKvCache)
+- [ ] KV cache for Gemma 4 (currently re-computes full sequence each step)
+- [ ] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
+- [ ] Wire sampler into remaining models (currently Mistral/Mixtral/etc use temperature-only)
+- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S, downloading)
+- [ ] Anthropic-compatible HTTP API adapter
+- [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
+- [ ] Streaming GGUF dequantization (avoid 50GB RAM for full f32 expansion)
 
 ### Shared Building Blocks (burn-models-core)
 
