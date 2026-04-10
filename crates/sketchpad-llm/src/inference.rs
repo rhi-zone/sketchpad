@@ -30,6 +30,7 @@ use crate::{
     gemma::{Gemma, GemmaConfig, GemmaRuntime},
     gemma_loader::load_gemma,
     gemma4::{Gemma4, Gemma4Config, Gemma4Runtime},
+    gemma4_gguf_loader::load_gemma4_gguf,
     gemma4_loader::load_gemma4,
     jamba::{Jamba, JambaConfig, JambaRuntime},
     jamba_loader::load_jamba,
@@ -246,6 +247,36 @@ impl<B: Backend> LlmInstance<B> {
             model,
             tokenizer,
             model_type,
+        })
+    }
+
+    /// Load a model from a GGUF file
+    ///
+    /// GGUF files contain model weights and metadata (config).
+    /// A separate tokenizer.json is still required.
+    ///
+    /// # Arguments
+    ///
+    /// * `gguf_path` - Path to the .gguf file
+    /// * `tokenizer_path` - Path to tokenizer.json
+    /// * `device` - Device to load the model onto
+    pub fn load_gguf<P: AsRef<Path>>(
+        gguf_path: P,
+        tokenizer_path: P,
+        device: &B::Device,
+    ) -> Result<Self, LlmError> {
+        let tokenizer = Tokenizer::from_file(tokenizer_path.as_ref()).map_err(|e| {
+            LlmError::TokenizerError(format!("{}: {}", tokenizer_path.as_ref().display(), e))
+        })?;
+
+        // For now, only Gemma4 GGUF loading is supported
+        let (model, _runtime, _config) =
+            load_gemma4_gguf(gguf_path, device).map_err(|e| LlmError::LoadError(e.to_string()))?;
+
+        Ok(Self {
+            model: ModelInstance::Gemma4(model, _runtime),
+            tokenizer,
+            model_type: ModelType::Gemma4,
         })
     }
 
