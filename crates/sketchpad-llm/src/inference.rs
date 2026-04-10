@@ -578,13 +578,19 @@ fn parse_gemma4_config(json: &str) -> Result<Gemma4Config, LlmError> {
         .as_u64()
         .unwrap_or((hidden_size / num_heads) as u64) as usize;
 
-    // Parse moe_layers from config, defaulting to odd layers
+    let num_experts = v["num_local_experts"].as_u64().unwrap_or(0) as usize;
+
+    // Parse moe_layers: explicit list > derive from num_experts > empty (dense)
     let moe_layers = if let Some(arr) = v["moe_layers"].as_array() {
         arr.iter()
             .filter_map(|x| x.as_u64().map(|n| n as usize))
             .collect()
-    } else {
+    } else if num_experts > 0 {
+        // MoE model without explicit layer list — default to odd layers
         (0..num_layers).filter(|i| i % 2 == 1).collect()
+    } else {
+        // Dense model — no MoE layers
+        Vec::new()
     };
 
     Ok(Gemma4Config {
@@ -601,9 +607,13 @@ fn parse_gemma4_config(json: &str) -> Result<Gemma4Config, LlmError> {
         final_logit_softcap: v["final_logit_softcapping"].as_f64().unwrap_or(30.0) as f32,
         norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
         rope_base: v["rope_theta"].as_f64().unwrap_or(1000000.0) as f32,
-        num_experts: v["num_local_experts"].as_u64().unwrap_or(128) as usize,
-        num_shared_experts: v["num_shared_experts"].as_u64().unwrap_or(1) as usize,
-        num_experts_per_tok: v["num_experts_per_tok"].as_u64().unwrap_or(8) as usize,
+        num_experts: num_experts.max(1), // at least 1 for dense FFN construction
+        num_shared_experts: v["num_shared_experts"]
+            .as_u64()
+            .unwrap_or(if num_experts > 0 { 1 } else { 0 }) as usize,
+        num_experts_per_tok: v["num_experts_per_tok"]
+            .as_u64()
+            .unwrap_or(if num_experts > 0 { 8 } else { 1 }) as usize,
         moe_layers,
     })
 }
