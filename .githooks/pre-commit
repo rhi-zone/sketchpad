@@ -9,16 +9,6 @@ if [ -n "$staged" ]; then
 fi
 
 echo "Running cargo clippy..."
-# Run clippy per-crate on changed crates to avoid pulling in tracel-llvm
-# (cubecl unconditionally depends on it, and NixOS can't run the binary)
-changed_crates=$(git diff --cached --name-only | grep '^crates/' | sed 's|^crates/\([^/]*\)/.*|\1|' | sort -u)
-if [ -n "$changed_crates" ]; then
-  for crate in $changed_crates; do
-    cargo clippy -p "$crate" --all-targets -- -D warnings
-  done
-else
-  # Non-crate changes — just check the workspace lib
-  cargo clippy -p sketchpad --all-targets -- -D warnings
-fi
+cargo clippy --all-targets --all-features -- -D warnings
 
 echo "Pre-commit checks passed!"

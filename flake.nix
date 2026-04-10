@@ -32,6 +32,8 @@
         devShells.default = pkgs.mkShell rec {
           buildInputs = commonBuildInputs;
           LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH";
+          # tracel-llvm ships pre-built ELF binaries that need a real dynamic linker
+          NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
         };
 
         # CUDA shell - use with `nix develop .#cuda`
@@ -44,6 +46,7 @@
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs
             + ":/run/opengl-driver/lib"  # System NVIDIA driver (libcuda.so)
             + ":$LD_LIBRARY_PATH";
+          NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
           CUDA_PATH = pkgs.cudaPackages.cudatoolkit;
         };
       }
