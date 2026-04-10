@@ -1,6 +1,6 @@
 //! Weight Loading and Serialization
 //!
-//! This crate handles loading model weights from safetensors format
+//! This crate handles loading model weights from safetensors and GGUF formats
 //! and provides serialization utilities for Burn models.
 //!
 //! # Weight Loading
@@ -42,6 +42,7 @@
 
 pub mod controlnet_loader;
 pub mod embedding_loader;
+pub mod gguf;
 pub mod loader;
 pub mod lora_loader;
 pub mod mapping;
@@ -52,6 +53,7 @@ pub use controlnet_loader::{
     ControlNetInfo, ControlNetLoadError, ControlNetType, load_controlnet_info,
 };
 pub use embedding_loader::{EmbeddingFormat, EmbeddingLoadError, load_embedding};
+pub use gguf::{GgufError, GgufFile};
 pub use loader::{LoadError, SafeTensorFile};
 pub use lora_loader::{LoraFormat, LoraLoadError, load_lora};
 pub use sd_loader::{SdLoadError, SdWeightLoader};
