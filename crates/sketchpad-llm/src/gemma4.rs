@@ -21,7 +21,7 @@
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 
-use sketchpad_core::kv_cache::ModelKvCache;
+use sketchpad_core::kv_cache::{AttentionCache, ModelKvCache};
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::{causal_mask, sliding_window_mask};
@@ -254,6 +254,34 @@ impl<B: Backend> Gemma4Attention<B> {
         mask: Option<Tensor<B, 2>>,
         softcap: f32,
     ) -> Tensor<B, 3> {
+        self.forward_inner(x, rope, start_pos, mask, softcap, None, 0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        softcap: f32,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        self.forward_inner(x, rope, start_pos, mask, softcap, Some(cache), layer_idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_inner(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        softcap: f32,
+        mut cache: Option<&mut dyn AttentionCache<B>>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
         let q = self.q_proj.forward(x.clone());
@@ -271,6 +299,14 @@ impl<B: Backend> Gemma4Attention<B> {
             .swap_dims(1, 2);
 
         let (q, k) = rope.forward(q, k, start_pos);
+
+        // Update KV cache if provided; k/v become full-sequence tensors
+        let (k, v) = if let Some(cache) = cache.as_mut() {
+            let update = cache.update_layer(layer_idx, k, v);
+            (update.k, update.v)
+        } else {
+            (k, v)
+        };
 
         let k = self.repeat_kv(k);
         let v = self.repeat_kv(v);
@@ -556,6 +592,54 @@ impl<B: Backend> Gemma4Layer<B> {
         global_mask: Option<Tensor<B, 2>>,
         softcap: f32,
     ) -> Tensor<B, 3> {
+        self.forward_inner(
+            x,
+            rope,
+            start_pos,
+            sliding_mask,
+            global_mask,
+            softcap,
+            None,
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        sliding_mask: Option<Tensor<B, 2>>,
+        global_mask: Option<Tensor<B, 2>>,
+        softcap: f32,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        self.forward_inner(
+            x,
+            rope,
+            start_pos,
+            sliding_mask,
+            global_mask,
+            softcap,
+            Some(cache),
+            layer_idx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_inner(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        sliding_mask: Option<Tensor<B, 2>>,
+        global_mask: Option<Tensor<B, 2>>,
+        softcap: f32,
+        cache: Option<&mut dyn AttentionCache<B>>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
         let mask = if self.use_sliding_window {
             sliding_mask
         } else {
@@ -564,9 +648,14 @@ impl<B: Backend> Gemma4Layer<B> {
 
         // Pre-norm attention
         let normed = self.input_norm.forward(x.clone());
-        let attn_out = self
-            .attention
-            .forward(normed, rope, start_pos, mask, softcap);
+        let attn_out = match cache {
+            Some(cache) => self
+                .attention
+                .forward_cached(normed, rope, start_pos, mask, softcap, cache, layer_idx),
+            None => self
+                .attention
+                .forward(normed, rope, start_pos, mask, softcap),
+        };
         // Post-attention norm + residual
         let h = x + self.post_attention_norm.forward(attn_out);
 
@@ -603,42 +692,75 @@ impl<B: Backend> Gemma4<B> {
         &self,
         input_ids: Tensor<B, 2, Int>,
         runtime: &Gemma4Runtime<B>,
-        mut cache: Option<&mut ModelKvCache<B>>,
+        cache: Option<&mut dyn AttentionCache<B>>,
     ) -> Gemma4Output<B> {
         let [batch, seq_len] = input_ids.dims();
         let device = input_ids.device();
-
-        let start_pos = cache.as_ref().map(|c| c.seq_len()).unwrap_or(0);
 
         // Embedding with scaling (same as Gemma 2)
         let mut hidden_states = self.embed_tokens.forward(input_ids);
         let scale = (runtime.config.hidden_size as f32).sqrt();
         hidden_states = hidden_states * scale;
 
-        // Prepare both mask types
-        let (sliding_mask, global_mask) = if seq_len > 1 {
-            (
-                Some(sliding_window_mask::<B>(
-                    seq_len,
-                    runtime.config.sliding_window,
-                    &device,
-                )),
-                Some(causal_mask::<B>(seq_len, &device)),
-            )
-        } else {
-            (None, None)
-        };
+        match cache {
+            Some(cache) => {
+                let start_pos = cache.seq_len();
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let _ = cache.as_mut().map(|c| c.layer(layer_idx));
-            hidden_states = layer.forward(
-                hidden_states,
-                &runtime.rope,
-                start_pos,
-                sliding_mask.clone(),
-                global_mask.clone(),
-                runtime.config.attn_logit_softcap,
-            );
+                // With cache: for prefill (seq_len > 1), use full masks over [new_seq, total_seq].
+                // For decode (seq_len == 1), no mask needed (single token attends to all cached).
+                let (sliding_mask, global_mask) = if seq_len > 1 {
+                    let total_len = start_pos + seq_len;
+                    (
+                        Some(sliding_window_prefill_mask::<B>(
+                            seq_len,
+                            total_len,
+                            runtime.config.sliding_window,
+                            &device,
+                        )),
+                        Some(prefill_causal_mask::<B>(seq_len, total_len, &device)),
+                    )
+                } else {
+                    (None, None)
+                };
+
+                for (layer_idx, layer) in self.layers.iter().enumerate() {
+                    hidden_states = layer.forward_cached(
+                        hidden_states,
+                        &runtime.rope,
+                        start_pos,
+                        sliding_mask.clone(),
+                        global_mask.clone(),
+                        runtime.config.attn_logit_softcap,
+                        cache,
+                        layer_idx,
+                    );
+                }
+            }
+            None => {
+                let (sliding_mask, global_mask) = if seq_len > 1 {
+                    (
+                        Some(sliding_window_mask::<B>(
+                            seq_len,
+                            runtime.config.sliding_window,
+                            &device,
+                        )),
+                        Some(causal_mask::<B>(seq_len, &device)),
+                    )
+                } else {
+                    (None, None)
+                };
+
+                for layer in &self.layers {
+                    hidden_states = layer.forward(
+                        hidden_states,
+                        &runtime.rope,
+                        0,
+                        sliding_mask.clone(),
+                        global_mask.clone(),
+                        runtime.config.attn_logit_softcap,
+                    );
+                }
+            }
         }
 
         hidden_states = self.norm.forward(hidden_states);
@@ -673,35 +795,91 @@ impl<B: Backend> Gemma4<B> {
         sampler: &crate::sampling::SamplerConfig,
     ) -> Tensor<B, 2, Int> {
         let [batch, _prompt_len] = input_ids.dims();
+        let mut cache =
+            ModelKvCache::<B>::new(runtime.config.num_layers, runtime.config.max_seq_len);
 
         // Track generated token IDs for repetition/DRY penalties
         let input_data: Vec<i64> = input_ids.to_data().to_vec().unwrap();
         let mut context_tokens: Vec<u32> = input_data.iter().map(|&id| id as u32).collect();
 
         let device = input_ids.device();
-        let mut all_tokens = input_ids;
 
-        for _ in 0..max_new_tokens {
-            let output = self.forward(all_tokens.clone(), runtime, None);
+        // Prefill: process the entire prompt at once
+        let output = self.forward(input_ids.clone(), runtime, Some(&mut cache));
 
-            let seq_len = all_tokens.dims()[1];
-            let last_logits = output.logits.slice([
-                0..batch,
-                (seq_len - 1)..seq_len,
-                0..runtime.config.vocab_size,
-            ]);
+        let seq_len = input_ids.dims()[1];
+        let last_logits = output.logits.slice([
+            0..batch,
+            (seq_len - 1)..seq_len,
+            0..runtime.config.vocab_size,
+        ]);
+        let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
+        let token_id = crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+        context_tokens.push(token_id);
+
+        let mut next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
+        let mut all_tokens = Tensor::cat(vec![input_ids, next_token.clone()], 1);
+
+        // Decode: generate one token at a time using the cache
+        for _ in 1..max_new_tokens {
+            let output = self.forward(next_token, runtime, Some(&mut cache));
+
+            let last_logits = output
+                .logits
+                .slice([0..batch, 0..1, 0..runtime.config.vocab_size]);
             let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
-
             let token_id =
                 crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
             context_tokens.push(token_id);
 
-            let next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
-            all_tokens = Tensor::cat(vec![all_tokens, next_token], 1);
+            next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
+            all_tokens = Tensor::cat(vec![all_tokens, next_token.clone()], 1);
         }
 
         all_tokens
     }
+}
+
+/// Causal mask for prefill with cached positions: [new_len, total_len]
+fn prefill_causal_mask<B: Backend>(
+    new_len: usize,
+    total_len: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let start_pos = total_len - new_len;
+    let mut mask_data = vec![0.0f32; new_len * total_len];
+    for i in 0..new_len {
+        let global_pos = start_pos + i;
+        for j in (global_pos + 1)..total_len {
+            mask_data[i * total_len + j] = f32::NEG_INFINITY;
+        }
+    }
+    Tensor::<B, 1>::from_floats(mask_data.as_slice(), device).reshape([new_len, total_len])
+}
+
+/// Sliding window mask for prefill with cached positions: [new_len, total_len]
+fn sliding_window_prefill_mask<B: Backend>(
+    new_len: usize,
+    total_len: usize,
+    window_size: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let start_pos = total_len - new_len;
+    let mut mask_data = vec![0.0f32; new_len * total_len];
+    for i in 0..new_len {
+        let global_pos = start_pos + i;
+        for j in 0..total_len {
+            // Mask future positions
+            if j > global_pos {
+                mask_data[i * total_len + j] = f32::NEG_INFINITY;
+            }
+            // Mask positions outside sliding window
+            if global_pos >= window_size && j < global_pos - window_size + 1 {
+                mask_data[i * total_len + j] = f32::NEG_INFINITY;
+            }
+        }
+    }
+    Tensor::<B, 1>::from_floats(mask_data.as_slice(), device).reshape([new_len, total_len])
 }
 
 #[cfg(test)]
