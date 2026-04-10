@@ -330,7 +330,7 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] Gemma 4 GGUF loader - auto-config from metadata, fused expert tensor splitting
 - [x] Sampler pipeline - DRY, XTC, repetition penalty, temperature, top-k, top-p, min-p
 - [x] KV cache for LLaMA (prefill+decode with ModelKvCache)
-- [ ] KV cache for Gemma 4 (currently re-computes full sequence each step)
+- [x] KV cache for Gemma 4 (prefill+decode with ModelKvCache)
 - [ ] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
 - [ ] Wire sampler into remaining models (currently Mistral/Mixtral/etc use temperature-only)
 - [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S, downloading)
