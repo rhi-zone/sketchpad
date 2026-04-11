@@ -333,7 +333,7 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] KV cache for Gemma 4 (prefill+decode with ModelKvCache)
 - [ ] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
 - [ ] Wire sampler into remaining models (currently Mistral/Mixtral/etc use temperature-only)
-- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S, downloading)
+- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — BLOCKED: f32 dequant of 26B MoE needs ~104GB RAM (have 60GB). Need quantized inference or streaming dequant
 - [ ] Anthropic-compatible HTTP API adapter
 - [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
 - [ ] Streaming GGUF dequantization (avoid 50GB RAM for full f32 expansion)
