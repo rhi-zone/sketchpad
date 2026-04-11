@@ -460,6 +460,14 @@ fn run_llm_command_with_backend<B: burn::prelude::Backend>(
             temperature,
         } => llm::run_chat::<B>(model, weights, system, max_tokens, temperature, device),
 
+        llm::LlmCommands::Gguf {
+            weights,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+        } => llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, device),
+
         #[cfg(feature = "llm-serve")]
         llm::LlmCommands::Serve {
             model,

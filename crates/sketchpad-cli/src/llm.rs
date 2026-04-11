@@ -9,6 +9,11 @@ use anyhow::{Context, Result};
 use burn::prelude::*;
 use clap::{Subcommand, ValueEnum};
 
+use sketchpad_convert::gguf::{GgufFile, MetadataValue};
+use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
+use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf;
+use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
+use sketchpad_llm::sampling::SamplerConfig;
 use sketchpad_llm::{ChatSession, GenerationConfig, LlmInstance, ModelType};
 
 /// LLM model type selection
@@ -104,6 +109,32 @@ pub enum LlmCommands {
         /// Sampling temperature
         #[arg(long, default_value = "0.7")]
         temperature: f32,
+    },
+
+    /// Generate text from a GGUF model file (auto-detects architecture)
+    ///
+    /// Supports gemma2 and gemma4 architectures. Tokenizer and chat template
+    /// are loaded directly from the GGUF — no separate tokenizer.json needed.
+    Gguf {
+        /// Path to the GGUF model file
+        #[arg(short, long)]
+        weights: PathBuf,
+
+        /// Input prompt (chat template is applied automatically for instruct models)
+        #[arg(short, long)]
+        prompt: String,
+
+        /// Maximum tokens to generate
+        #[arg(long, default_value = "256")]
+        max_tokens: usize,
+
+        /// Sampling temperature
+        #[arg(long, default_value = "0.7")]
+        temperature: f32,
+
+        /// Top-p sampling threshold
+        #[arg(long, default_value = "0.9")]
+        top_p: f32,
     },
 
     /// Start an OpenAI-compatible HTTP server
@@ -205,6 +236,102 @@ pub fn run_chat<B: Backend>(
             }
         }
     }
+
+    Ok(())
+}
+
+/// Run inference on a GGUF model file, auto-detecting architecture
+pub fn run_gguf<B: Backend>(
+    weights: PathBuf,
+    prompt: String,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    device: &B::Device,
+) -> Result<()> {
+    let path = weights.to_str().context("Invalid path")?;
+
+    // Read arch, tokenizer, and chat template from a single GGUF open
+    let (arch, tokenizer, seq_len, token_ids) = {
+        let file = GgufFile::open(path).context("Failed to open GGUF")?;
+
+        let arch = match file.metadata().get("general.architecture") {
+            Some(MetadataValue::String(s)) => s.clone(),
+            _ => "gemma4".to_string(),
+        };
+
+        let formatted = if gguf_tokenizer::raw_chat_template(&file).is_some() {
+            let msgs = [ChatMessage::user(prompt.as_str())];
+            gguf_tokenizer::apply_chat_template(&file, &msgs, true)
+                .context("Failed to apply chat template")?
+        } else {
+            prompt.clone()
+        };
+
+        let tokenizer =
+            gguf_tokenizer::load_tokenizer(&file).context("Failed to load tokenizer")?;
+        let encoding = tokenizer
+            .encode(formatted.as_str(), false)
+            .map_err(|e| anyhow::anyhow!("Tokenize error: {e}"))?;
+        let ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
+        let len = ids.len();
+
+        (arch, tokenizer, len, ids)
+    };
+
+    eprintln!("Architecture: {arch}  Prompt: {seq_len} tokens");
+
+    let data = TensorData::new(token_ids, [1, seq_len]);
+    let input_ids = Tensor::<B, 2, Int>::from_data(data, device);
+
+    let new_ids: Vec<u32> = match arch.as_str() {
+        "gemma2" => {
+            eprintln!("Loading Gemma 2...");
+            let start = std::time::Instant::now();
+            let (model, runtime, _) =
+                load_gemma_gguf::<B, _>(path, device).context("Failed to load Gemma 2")?;
+            eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
+
+            let t = std::time::Instant::now();
+            let out = model.generate(input_ids, &runtime, max_tokens, temperature);
+            let elapsed = t.elapsed().as_secs_f64();
+            let all: Vec<i32> = out.to_data().to_vec().unwrap();
+            let n = all.len() - seq_len;
+            eprintln!(
+                "{n} tokens in {elapsed:.1}s ({:.1} tok/s)",
+                n as f64 / elapsed
+            );
+            all[seq_len..].iter().map(|&id| id as u32).collect()
+        }
+        _ => {
+            eprintln!("Loading Gemma 4...");
+            let start = std::time::Instant::now();
+            let (model, runtime, _) =
+                load_gemma4_gguf::<B, _>(path, device).context("Failed to load Gemma 4")?;
+            eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
+
+            let sampler = SamplerConfig {
+                temperature,
+                top_p,
+                ..SamplerConfig::greedy()
+            };
+            let t = std::time::Instant::now();
+            let out = model.generate(input_ids, &runtime, max_tokens, &sampler);
+            let elapsed = t.elapsed().as_secs_f64();
+            let all: Vec<i32> = out.to_data().to_vec().unwrap();
+            let n = all.len() - seq_len;
+            eprintln!(
+                "{n} tokens in {elapsed:.1}s ({:.1} tok/s)",
+                n as f64 / elapsed
+            );
+            all[seq_len..].iter().map(|&id| id as u32).collect()
+        }
+    };
+
+    let generated = tokenizer
+        .decode(&new_ids, true)
+        .unwrap_or_else(|e| format!("<decode error: {e}>"));
+    println!("{generated}");
 
     Ok(())
 }
