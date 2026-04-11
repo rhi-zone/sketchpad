@@ -379,7 +379,11 @@ fn load_gemma4_moe<B: Backend>(
 
     Ok(Gemma4MoE {
         router,
-        router_norm: None,
+        pre_ffn_norm_moe: None,
+        router_extra_scale: None,
+        post_ffn_norm_shared: None,
+        post_ffn_norm_routed: None,
+        expert_down_scale: None,
         experts: ExpertWeights::Full(experts),
         shared_experts,
         top_k: config.num_experts_per_tok,

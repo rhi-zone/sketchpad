@@ -552,16 +552,72 @@ fn load_moe<B: Backend>(
         )?,
     };
 
-    // Optional router input normalization (heretic models store ffn_gate_inp.scale).
-    // The router operates on rms_norm(h) / sqrt(hidden_size) * ffn_gate_inp_scale,
-    // which is equivalent to RmsNorm with weight = ffn_gate_inp_scale / sqrt(hidden_size).
-    let router_norm = {
-        let scale_name = format!("blk.{idx}.ffn_gate_inp.scale");
-        if file.contains(&scale_name) {
-            let scale: Tensor<B, 1> = file.load_f32(&scale_name, device)?;
+    // Heretic model: separate pre-norm for routed expert path (preFfwNorm2)
+    let pre_ffn_norm_moe = {
+        let name = format!("blk.{idx}.pre_ffw_norm_2.weight");
+        if file.contains(&name) {
+            Some(load_rmsnorm(
+                file,
+                &name,
+                config.hidden_size,
+                config.norm_eps,
+                device,
+            )?)
+        } else {
+            None
+        }
+    };
+
+    // Heretic model: router extra scale (ffnGateInpScale / sqrt(hidden_size))
+    // Router input = pre_ffn_norm_moe(h) * router_extra_scale
+    let router_extra_scale = {
+        let name = format!("blk.{idx}.ffn_gate_inp.scale");
+        if file.contains(&name) {
+            let scale: Tensor<B, 1> = file.load_f32(&name, device)?;
             let inv_sqrt = (config.hidden_size as f32).sqrt().recip();
-            let weight = scale * inv_sqrt;
-            Some(RmsNorm::from_weight(weight, config.norm_eps))
+            Some(scale * inv_sqrt)
+        } else {
+            None
+        }
+    };
+
+    // Heretic model: post-norm for shared expert output (ffnPostNorm1)
+    let post_ffn_norm_shared = {
+        let name = format!("blk.{idx}.post_ffw_norm_1.weight");
+        if file.contains(&name) {
+            Some(load_rmsnorm(
+                file,
+                &name,
+                config.hidden_size,
+                config.norm_eps,
+                device,
+            )?)
+        } else {
+            None
+        }
+    };
+
+    // Heretic model: post-norm for routed expert output (ffnPostNorm2)
+    let post_ffn_norm_routed = {
+        let name = format!("blk.{idx}.post_ffw_norm_2.weight");
+        if file.contains(&name) {
+            Some(load_rmsnorm(
+                file,
+                &name,
+                config.hidden_size,
+                config.norm_eps,
+                device,
+            )?)
+        } else {
+            None
+        }
+    };
+
+    // Heretic model: per-expert down-projection output scale (ffnDownExpsScale)
+    let expert_down_scale = {
+        let name = format!("blk.{idx}.ffn_down_exps.scale");
+        if file.contains(&name) {
+            Some(file.load_f32::<B, 1>(&name, device)?)
         } else {
             None
         }
@@ -569,7 +625,11 @@ fn load_moe<B: Backend>(
 
     Ok(Gemma4MoE {
         router,
-        router_norm,
+        pre_ffn_norm_moe,
+        router_extra_scale,
+        post_ffn_norm_shared,
+        post_ffn_norm_routed,
+        expert_down_scale,
         experts,
         shared_experts: vec![shared_expert],
         top_k: config.num_experts_per_tok,

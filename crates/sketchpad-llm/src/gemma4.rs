@@ -419,14 +419,33 @@ impl<B: Backend> Gemma4ExpertFfn<B> {
 /// Contains a router, a set of sparse experts, and shared experts
 /// that are always active. The output combines routed expert output
 /// with shared expert output.
+///
+/// Heretic/distilled models add per-path norms that split the shared and routed
+/// expert computations:
+/// - shared path:  `pre_ffn_norm(h)` → shared expert → `post_ffn_norm_shared` → combine
+/// - routed path:  `pre_ffn_norm_moe(h)` → router & experts → `post_ffn_norm_routed` → combine
+/// - router input: `pre_ffn_norm_moe(h)` * `router_extra_scale` (= ffnGateInpScale/√d)
+/// - combined output is then passed through the layer-level `post_ffn_norm`
 #[derive(Debug)]
 pub struct Gemma4MoE<B: Backend> {
     /// Router: linear projection from hidden_size to num_experts
     pub router: Linear<B>,
-    /// Optional router input norm (for heretic-style models with ffn_gate_inp.scale).
-    /// Weight = ffn_gate_inp_scale / sqrt(hidden_size). Applied to the raw pre-FFN
-    /// hidden state before routing (not to the pre_ffn_norm output used by experts).
-    pub router_norm: Option<RmsNorm<B>>,
+    /// Separate pre-norm for the routed expert path (`preFfwNorm2`).
+    /// Applied to raw `h`; output is used as both expert input and (scaled) router input.
+    /// Shared experts still use the layer-level `pre_ffn_norm`. Only present in heretic models.
+    pub pre_ffn_norm_moe: Option<RmsNorm<B>>,
+    /// Additional element-wise scale applied to `pre_ffn_norm_moe(h)` before router
+    /// projection (`ffnGateInpScale / √hidden_size`). Only present in heretic models.
+    pub router_extra_scale: Option<Tensor<B, 1>>,
+    /// Post-norm applied to shared expert output before combining (`ffnPostNorm1`).
+    /// Only present in heretic-style models.
+    pub post_ffn_norm_shared: Option<RmsNorm<B>>,
+    /// Post-norm applied to routed expert output before combining (`ffnPostNorm2`).
+    /// Only present in heretic-style models.
+    pub post_ffn_norm_routed: Option<RmsNorm<B>>,
+    /// Per-expert output scale applied after each expert's down projection (`ffnDownExpsScale`).
+    /// Shape: [num_experts]. Only present in heretic-style models.
+    pub expert_down_scale: Option<Tensor<B, 1>>,
     /// Sparse experts (selected by router) — either full-precision or quantized
     pub experts: ExpertWeights<B>,
     /// Shared experts (always active, output added to routed output)
@@ -493,7 +512,11 @@ impl<B: Backend> Gemma4MoE<B> {
 
         Self {
             router,
-            router_norm: None,
+            pre_ffn_norm_moe: None,
+            router_extra_scale: None,
+            post_ffn_norm_shared: None,
+            post_ffn_norm_routed: None,
+            expert_down_scale: None,
             experts,
             shared_experts,
             top_k,
@@ -503,47 +526,43 @@ impl<B: Backend> Gemma4MoE<B> {
 
     /// Forward pass.
     ///
-    /// - `x`: expert input (output of pre_ffn_norm applied to the hidden state)
-    /// - `router_raw`: raw hidden state before pre_ffn_norm, used as router input when
-    ///   `router_norm` is set (heretic models with `ffn_gate_inp.scale`)
+    /// - `x`: shared expert input (output of layer-level `pre_ffn_norm` applied to `h`)
+    /// - `router_raw`: raw hidden state `h` before `pre_ffn_norm`; used for:
+    ///   - `pre_ffn_norm_moe(h)` → routed expert input + (scaled) router input
     pub fn forward(&self, x: Tensor<B, 3>, router_raw: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
         let [batch, seq_len, hidden_size] = x.dims();
         let num_tokens = batch * seq_len;
         let device = x.device();
 
-        // Flatten to [num_tokens, hidden_size]
         let x_flat = x.clone().reshape([num_tokens, hidden_size]);
 
-        // Router input: use normalized raw hidden state if available, else fall back to x
-        let router_input_flat = match (&self.router_norm, router_raw) {
-            (Some(norm), Some(raw)) => norm.forward(raw).reshape([num_tokens, hidden_size]),
+        // Routed expert input: preFfwNorm2(h) if available, else pre_ffn_norm(h) (= x)
+        let routed_flat = match (&self.pre_ffn_norm_moe, &router_raw) {
+            (Some(norm), Some(raw)) => norm.forward(raw.clone()).reshape([num_tokens, hidden_size]),
             _ => x_flat.clone(),
         };
 
-        // Router logits: [num_tokens, num_experts]
+        // Router input: routed_flat * (ffnGateInpScale / sqrt(d)) if available, else routed_flat
+        let router_input_flat = match &self.router_extra_scale {
+            Some(scale) => routed_flat.clone() * scale.clone().unsqueeze(),
+            None => routed_flat.clone(),
+        };
+
+        // Router logits → top-k routing weights
         let logits: Tensor<B, 2> = self.router.forward(router_input_flat);
-
-        // Softmax over experts
         let probs = burn::tensor::activation::softmax(logits, 1);
-
-        // Get top-k experts and weights
         let (top_weights, top_indices) = probs.topk_with_indices(self.top_k, 1);
-
-        // Normalize weights
         let weight_sum = top_weights.clone().sum_dim(1);
         let routing_weights = top_weights / weight_sum;
 
-        // Compute routed expert outputs
-        let mut output = Tensor::zeros([num_tokens, hidden_size], &device);
-
+        // --- Routed expert outputs ---
+        let mut routed_output = Tensor::zeros([num_tokens, hidden_size], &device);
         for expert_idx in 0..self.num_experts {
             let expert_mask =
                 self.compute_expert_mask(&top_indices, expert_idx, num_tokens, &device);
-
             if !self.has_assigned_tokens(&expert_mask) {
                 continue;
             }
-
             let expert_weights = self.get_expert_weights(
                 &top_indices,
                 &routing_weights,
@@ -551,27 +570,47 @@ impl<B: Backend> Gemma4MoE<B> {
                 num_tokens,
                 &device,
             );
-
-            let expert_input = x_flat.clone().reshape([num_tokens, 1, hidden_size]);
+            let expert_input = routed_flat.clone().reshape([num_tokens, 1, hidden_size]);
             let expert_out = match &self.experts {
                 ExpertWeights::Full(experts) => experts[expert_idx].forward(expert_input),
                 ExpertWeights::Quantized(fused) => fused.forward_expert(expert_idx, expert_input),
             };
-            let expert_out = expert_out.reshape([num_tokens, hidden_size]);
-
-            let weighted_out = expert_out * expert_weights.unsqueeze_dim(1);
-            output = output + weighted_out;
+            let mut expert_out = expert_out.reshape([num_tokens, hidden_size]);
+            // Per-expert output scale (`ffnDownExpsScale[expert_idx]`)
+            if let Some(scales) = &self.expert_down_scale {
+                let s: f32 = scales.clone().narrow(0, expert_idx, 1).into_scalar().elem();
+                expert_out = expert_out * s;
+            }
+            routed_output = routed_output + expert_out * expert_weights.unsqueeze_dim(1);
         }
 
-        // Add shared expert output
+        // Apply per-path post-norm to routed output (`ffnPostNorm2`)
+        let routed_output = match &self.post_ffn_norm_routed {
+            Some(norm) => norm
+                .forward(routed_output.reshape([batch, seq_len, hidden_size]))
+                .reshape([num_tokens, hidden_size]),
+            None => routed_output,
+        };
+
+        // --- Shared expert outputs ---
+        let mut shared_output = Tensor::zeros([num_tokens, hidden_size], &device);
         for shared_expert in &self.shared_experts {
             let shared_input = x_flat.clone().reshape([num_tokens, 1, hidden_size]);
-            let shared_out = shared_expert.forward(shared_input);
-            let shared_out = shared_out.reshape([num_tokens, hidden_size]);
-            output = output + shared_out;
+            let shared_out = shared_expert
+                .forward(shared_input)
+                .reshape([num_tokens, hidden_size]);
+            shared_output = shared_output + shared_out;
         }
 
-        output.reshape([batch, seq_len, hidden_size])
+        // Apply per-path post-norm to shared output (`ffnPostNorm1`)
+        let shared_output = match &self.post_ffn_norm_shared {
+            Some(norm) => norm
+                .forward(shared_output.reshape([batch, seq_len, hidden_size]))
+                .reshape([num_tokens, hidden_size]),
+            None => shared_output,
+        };
+
+        (routed_output + shared_output).reshape([batch, seq_len, hidden_size])
     }
 
     fn compute_expert_mask(
