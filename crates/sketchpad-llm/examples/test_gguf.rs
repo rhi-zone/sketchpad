@@ -3,12 +3,10 @@
 //! Tokenizer and chat template are loaded directly from the GGUF file —
 //! no separate tokenizer.json needed.
 //!
-//! Usage:
-//!   # Raw completion:
-//!   cargo run --example test_gguf -- <gguf-path> "Your prompt" [max-tokens]
+//! If the GGUF contains a chat template (instruct models), the prompt is
+//! automatically formatted with it. Base models receive the prompt as-is.
 //!
-//!   # Instruct mode (wraps prompt in Gemma IT chat template):
-//!   cargo run --example test_gguf -- <gguf-path> --instruct "Your question" [max-tokens]
+//! Usage: cargo run --example test_gguf -- <gguf-path> <prompt> [max-tokens]
 
 use burn::prelude::*;
 use burn_ndarray::NdArray;
@@ -21,25 +19,13 @@ type B = NdArray<f32>;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!(
-            "Usage: {} <gguf-path> [--instruct] <prompt> [max-tokens]",
-            args[0]
-        );
+        eprintln!("Usage: {} <gguf-path> <prompt> [max-tokens]", args[0]);
         std::process::exit(1);
     }
 
     let gguf_path = &args[1];
-
-    // Parse --instruct flag and remaining args
-    let (instruct, prompt, max_tokens) = if args.get(2).map(|s| s.as_str()) == Some("--instruct") {
-        let prompt = args.get(3).map(|s| s.as_str()).unwrap_or("Hello!");
-        let max_tokens = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(256usize);
-        (true, prompt, max_tokens)
-    } else {
-        let prompt = args[2].as_str();
-        let max_tokens = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(128usize);
-        (false, prompt, max_tokens)
-    };
+    let prompt = args[2].as_str();
+    let max_tokens: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(256);
 
     let device = <B as Backend>::Device::default();
 
@@ -53,8 +39,8 @@ fn main() {
     let file = sketchpad_convert::gguf::GgufFile::open(gguf_path).expect("Failed to reopen GGUF");
     let tokenizer = gguf_tokenizer::load_tokenizer(&file).expect("Failed to load tokenizer");
 
-    // Format prompt: raw or wrapped in the model's own chat template (from GGUF metadata)
-    let formatted = if instruct {
+    // Apply chat template if the model has one (instruct models), else use prompt as-is
+    let formatted = if gguf_tokenizer::raw_chat_template(&file).is_some() {
         let msgs = [ChatMessage::user(prompt)];
         gguf_tokenizer::apply_chat_template(&file, &msgs, true)
             .expect("Failed to apply chat template")
@@ -91,9 +77,5 @@ fn main() {
         .decode(&new_ids, true)
         .unwrap_or_else(|e| format!("<decode error: {e}>"));
 
-    if instruct {
-        println!("{generated}");
-    } else {
-        println!("{prompt}{generated}");
-    }
+    println!("{generated}");
 }
