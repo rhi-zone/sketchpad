@@ -501,13 +501,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Gemma4(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
-            // Other models still use the legacy temperature-only interface
-            ModelInstance::Mistral(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::Mistral(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
             ModelInstance::Mixtral(model, runtime) => model.generate(
                 input_ids,
                 runtime,
