@@ -405,25 +405,89 @@ impl SamplerType {
 
 /// Run LLM commands using the default backend
 fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
-    // Use wgpu backend by default, fall back to ndarray
+    match command {
+        llm::LlmCommands::Gguf {
+            weights,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            precision,
+        } => run_gguf_command(weights, prompt, max_tokens, temperature, top_p, precision),
+        command => {
+            // Non-GGUF LLM commands use f32; GGUF has its own precision dispatch above
+            #[cfg(feature = "wgpu")]
+            {
+                use burn::backend::{Wgpu, wgpu::WgpuDevice};
+                type Backend = Wgpu<f32>;
+                let device = WgpuDevice::default();
+                run_llm_command_with_backend::<Backend>(command, &device)
+            }
+
+            #[cfg(all(feature = "ndarray", not(feature = "wgpu")))]
+            {
+                use burn_ndarray::NdArray;
+                type Backend = NdArray<f32>;
+                let device = Default::default();
+                run_llm_command_with_backend::<Backend>(command, &device)
+            }
+
+            #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
+            {
+                let _ = command;
+                anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
+            }
+        }
+    }
+}
+
+/// Run GGUF inference with precision-specific backend dispatch
+fn run_gguf_command(
+    weights: std::path::PathBuf,
+    prompt: String,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    precision: Precision,
+) -> Result<()> {
     #[cfg(feature = "wgpu")]
     {
         use burn::backend::{Wgpu, wgpu::WgpuDevice};
-        type Backend = Wgpu<f32>;
         let device = WgpuDevice::default();
-        run_llm_command_with_backend::<Backend>(command, &device)
+
+        match precision {
+            #[cfg(feature = "precision-f32")]
+            Precision::F32 => {
+                type B = Wgpu<f32>;
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+            }
+            #[cfg(feature = "precision-f16")]
+            Precision::F16 => {
+                use half::f16;
+                type B = Wgpu<f16>;
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+            }
+            #[cfg(feature = "precision-bf16")]
+            Precision::Bf16 => {
+                use half::bf16;
+                type B = Wgpu<bf16>;
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+            }
+        }
     }
 
+    // CPU fallback: NdArray is f32-only regardless of precision setting
     #[cfg(all(feature = "ndarray", not(feature = "wgpu")))]
     {
         use burn_ndarray::NdArray;
-        type Backend = NdArray<f32>;
+        type B = NdArray<f32>;
         let device = Default::default();
-        run_llm_command_with_backend::<Backend>(command, &device)
+        llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
     }
 
     #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
     {
+        let _ = (weights, prompt, max_tokens, temperature, top_p, precision);
         anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
     }
 }
@@ -460,13 +524,8 @@ fn run_llm_command_with_backend<B: burn::prelude::Backend>(
             temperature,
         } => llm::run_chat::<B>(model, weights, system, max_tokens, temperature, device),
 
-        llm::LlmCommands::Gguf {
-            weights,
-            prompt,
-            max_tokens,
-            temperature,
-            top_p,
-        } => llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, device),
+        // Gguf is handled by run_gguf_command before reaching here
+        llm::LlmCommands::Gguf { .. } => unreachable!("Gguf dispatched before backend selection"),
 
         #[cfg(feature = "llm-serve")]
         llm::LlmCommands::Serve {
@@ -2029,7 +2088,7 @@ fn run_sdxl_generate_impl<B: Backend>(
 
 /// Run SDXL generation with flash attention (CubeCL backend)
 #[cfg(feature = "cubecl")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn run_sdxl_generate_flash<R, F, I, BT>(
     prompt: &str,
     negative: &str,
@@ -2371,6 +2430,7 @@ where
 
 /// Embed time IDs (size conditioning) with sinusoidal encoding for SDXL
 #[cfg(feature = "cubecl")]
+#[allow(dead_code)]
 fn embed_time_ids<B: burn::prelude::Backend>(
     time_ids: Tensor<B, 2>,
     embedding_dim: usize,

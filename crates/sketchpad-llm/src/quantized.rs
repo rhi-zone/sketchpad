@@ -214,16 +214,14 @@ impl QuantizedFusedExperts {
 
         // gate_up weight is [expert_inter*2, hidden_size] for this expert
         // After matmul: [n_tokens, expert_inter*2]
-        let gate_up_weight = QuantizedTensor {
-            data: gu_data.to_vec(), // TODO: avoid this copy with a borrowed variant
-            ggml_type: self.gate_up_type,
-            out_features: self.expert_inter * 2,
-            in_features: self.hidden_size,
-            row_bytes: (self.hidden_size / self.gate_up_type.block_size())
-                * self.gate_up_type.type_size(),
-        };
-
-        let gate_up_flat = gate_up_weight.matmul_f32(&input_data, n_tokens);
+        let gate_up_flat = quantized_matmul_f32(
+            gu_data,
+            self.gate_up_type,
+            self.expert_inter * 2,
+            self.hidden_size,
+            &input_data,
+            n_tokens,
+        );
 
         // Split into gate and up, apply GeGLU
         let mut hidden_buf = vec![0.0f32; n_tokens * self.expert_inter];
@@ -241,20 +239,50 @@ impl QuantizedFusedExperts {
         let dn_end = dn_start + self.down_bytes_per_expert;
         let dn_data = &self.down_data[dn_start..dn_end];
 
-        let down_weight = QuantizedTensor {
-            data: dn_data.to_vec(),
-            ggml_type: self.down_type,
-            out_features: self.hidden_size,
-            in_features: self.expert_inter,
-            row_bytes: (self.expert_inter / self.down_type.block_size())
-                * self.down_type.type_size(),
-        };
-
-        let output = down_weight.matmul_f32(&hidden_buf, n_tokens);
+        let output = quantized_matmul_f32(
+            dn_data,
+            self.down_type,
+            self.hidden_size,
+            self.expert_inter,
+            &hidden_buf,
+            n_tokens,
+        );
 
         let tensor_data = TensorData::new(output, [n_tokens, 1, self.hidden_size]);
         Tensor::from_data(tensor_data, &device)
     }
+}
+
+/// Matrix multiply without allocating a `QuantizedTensor`.
+///
+/// `data` is a row-major quantized weight matrix [out_features, in_features].
+/// `input` is [n_tokens, in_features] in f32.
+/// Returns [n_tokens, out_features] in f32.
+fn quantized_matmul_f32(
+    data: &[u8],
+    ggml_type: GgmlType,
+    out_features: usize,
+    in_features: usize,
+    input: &[f32],
+    n_tokens: usize,
+) -> Vec<f32> {
+    let row_bytes = (in_features / ggml_type.block_size()) * ggml_type.type_size();
+    let mut output = vec![0.0f32; n_tokens * out_features];
+    let mut row_buf = vec![0.0f32; in_features];
+    for out_idx in 0..out_features {
+        let row_start = out_idx * row_bytes;
+        dequantize_into(
+            &data[row_start..row_start + row_bytes],
+            ggml_type,
+            &mut row_buf,
+        );
+        for tok in 0..n_tokens {
+            let inp_start = tok * in_features;
+            output[tok * out_features + out_idx] =
+                dot_product(&input[inp_start..inp_start + in_features], &row_buf);
+        }
+    }
+    output
 }
 
 /// Dequantize raw block data into an existing buffer.

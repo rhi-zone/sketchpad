@@ -135,6 +135,12 @@ pub enum LlmCommands {
         /// Top-p sampling threshold
         #[arg(long, default_value = "0.9")]
         top_p: f32,
+
+        /// Float precision for model weights and activations
+        /// f16 halves VRAM vs f32; bf16 has the same range as f32 but less precision.
+        /// On CPU (ndarray), f32 is always used regardless.
+        #[arg(long, value_enum, default_value = "f16")]
+        precision: crate::Precision,
     },
 
     /// Start an OpenAI-compatible HTTP server
