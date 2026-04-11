@@ -357,18 +357,18 @@ side-table `HashMap<(layer_idx, weight_name), WeightStorage<B>>`. Forward pass c
 table and uses `QuantizedLinear::forward` or normal `Linear::forward`. Hash lookup overhead
 is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 
-- [ ] **Zero-copy expert bytes** (strategy 1, experts only): change `GgufFile._mmap` to
-  `Arc<Mmap>`, expose `mmap_arc() -> Arc<Mmap>` + `tensor_data_range()` returning offset/len.
-  `QuantizedFusedExperts` stores `Arc<Mmap>` + offset + len instead of `Vec<u8>`. Expert bytes
-  stay in OS page cache, evictable under pressure. Immediate ~17GB RAM savings for 26B model.
-- [ ] **`QuantizedLinear` struct**: analogous to `QuantizedFusedExperts` but for a single linear
-  layer. Holds `Vec<u8>` (or `Arc<Mmap>` slice) + shape + GgmlType. `forward<B>` dequantizes
+- [x] **Zero-copy expert bytes** (strategy 1, experts only): `QuantizedFusedExperts` stores
+  `Arc<Mmap>` + offset + len. Expert bytes stay in OS page cache, evictable under pressure.
+- [x] **`QuantizedLinear` struct**: holds `Vec<u8>` + shape + GgmlType. `forward<B>` dequantizes
   and uploads to GPU each call. Foundation for strategy 2 and the side-table approach.
-- [ ] **CPU offloading** (`--offload-weights`): populate runtime side-table with `QuantizedLinear`
-  for all attention/FFN weights. Pass side-table through forward. CLI flag for `llm gguf`.
-- [ ] **GPU-side quantized matmul** (strategy 3): keep Q4K/Q8 bytes in VRAM, dequantize in
-  a CubeCL kernel. Implement in `sketchpad-cubecl` — HIP for ROCm (7900 XTX native), CUDA
-  for NVIDIA, WGPU/Vulkan fallback. 4-8x VRAM savings vs f16. Enable `hip` cubecl feature.
+- [x] **CPU offloading** (`--offload-weights`): runtime side-table `offloaded_layers` in
+  `Gemma4Runtime`; attention/FFN weights stay in RAM as `QuantizedLinear`. CLI flag done.
+- [x] **GPU-side quantized matmul** (strategy 3, kernels): Q8_0 and Q4_K dequantization kernels
+  in `sketchpad-cubecl::quantized_matmul`. `GpuQuantizedLinear<R>` wraps packed i32 tensor in
+  VRAM, dequantizes per forward. Works on WGPU/CUDA/CPU via CubeCL backend dispatch.
+- [ ] **Wire GPU quantized linear into Gemma 4 inference**: `load_gemma4_gguf_gpu_quant` loader
+  variant that uploads weight bytes as `GpuQuantizedLinear<R>` instead of dequantizing to f16
+  on load. Requires CubeRuntime-aware loader and a GPU-quant path in the forward pass.
 
 ### Shared Building Blocks (burn-models-core)
 
