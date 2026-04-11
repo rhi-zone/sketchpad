@@ -329,7 +329,9 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] Wire sampler into remaining models (SamplerConfig in all models: LLaMA, Gemma 2/4, Mistral, Mixtral, Phi, Qwen, DeepSeek, RWKV, Mamba, Jamba)
 - [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — use `load_gemma4_gguf_gpu_quant`; attention/FFN weights stay as Q4K bytes in VRAM (~1–2 GB), MoE experts zero-copy mmap'd. Should fit a 16 GB GPU. Unrun, not blocked.
 - [ ] Anthropic-compatible HTTP API adapter
-- [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
+- [x] TurboQuant KV cache compression — `CompressedKvCache<B>` with PolarQuant (~3.9x vs f16, magnitude f16 + 4-bit direction); `--kv-quant` CLI flag; KV cache size included in VRAM budget estimate
+- [ ] TurboQuant: wire `CompressedKvCache` into model inference (currently only affects VRAM estimate, not actual cache used)
+- [ ] TurboQuant: QJL variant (random projection + 1-bit quantization, theoretical guarantees on attention quality)
 
 #### Memory / Offloading (GGUF inference)
 
