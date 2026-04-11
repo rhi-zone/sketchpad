@@ -678,10 +678,14 @@ impl<B: Backend> Rwkv<B> {
         input_ids: Tensor<B, 2, Int>,
         runtime: &RwkvRuntime<B>,
         max_new_tokens: usize,
-        temperature: f32,
+        sampler: &crate::sampling::SamplerConfig,
     ) -> Tensor<B, 2, Int> {
         let [batch, _] = input_ids.dims();
         let device = input_ids.device();
+
+        // Track generated token IDs for repetition/DRY penalties
+        let input_data: Vec<i64> = input_ids.to_data().to_vec().unwrap();
+        let mut context_tokens: Vec<u32> = input_data.iter().map(|&id| id as u32).collect();
 
         // Initialize states
         let mut states = self.init_states(runtime, batch, &device);
@@ -700,13 +704,11 @@ impl<B: Backend> Rwkv<B> {
 
         // Generate new tokens
         for _ in 0..max_new_tokens {
-            let scaled_logits = if (temperature - 1.0).abs() > 1e-6 {
-                last_logits.clone() / temperature
-            } else {
-                last_logits.clone()
-            };
+            let token_id =
+                crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+            context_tokens.push(token_id);
 
-            let next_token = scaled_logits.argmax(1).reshape([batch, 1]);
+            let next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
             all_tokens = Tensor::cat(vec![all_tokens, next_token.clone()], 1);
 
             // Forward single token with state
@@ -772,7 +774,12 @@ mod tests {
         let (model, runtime) = config.init::<TestBackend>(&device);
 
         let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
-        let generated = model.generate(prompt, &runtime, 3, 1.0);
+        let generated = model.generate(
+            prompt,
+            &runtime,
+            3,
+            &crate::sampling::SamplerConfig::greedy(),
+        );
 
         assert_eq!(generated.dims(), [1, 5]);
     }

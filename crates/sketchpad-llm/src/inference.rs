@@ -522,24 +522,15 @@ impl<B: Backend> LlmInstance<B> {
                 config.max_tokens,
                 config.sampler.temperature,
             ),
-            ModelInstance::Rwkv(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
-            ModelInstance::Mamba(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
-            ModelInstance::Jamba(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::Rwkv(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::Mamba(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::Jamba(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
         }
     }
 }
