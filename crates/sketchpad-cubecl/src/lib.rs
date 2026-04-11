@@ -30,6 +30,7 @@ mod conv3d;
 mod conv3d_optimized;
 mod groupnorm_silu;
 mod pool3d;
+mod quantized_matmul;
 mod utils;
 
 pub use attention::{
@@ -42,6 +43,7 @@ pub use groupnorm_silu::{
     tensor_to_cube,
 };
 pub use pool3d::{Pool3dOptions, avg_pool3d, max_pool3d};
+pub use quantized_matmul::{GpuQuantType, GpuQuantizedLinear, dequantize_q4k, dequantize_q8_0};
 
 // Re-export key types for consumers
 pub use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
