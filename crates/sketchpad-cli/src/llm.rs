@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use burn::prelude::*;
 use clap::{Subcommand, ValueEnum};
 
-use sketchpad_convert::gguf::{GgmlType, GgufFile, MetadataValue};
+use sketchpad_convert::gguf::{GgufFile, MetadataValue};
 use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
 use sketchpad_llm::gemma4_gguf_loader::{load_gemma4_gguf, load_gemma4_gguf_offloaded};
 use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
@@ -148,8 +148,7 @@ pub enum LlmCommands {
         precision: crate::Precision,
 
         /// Available VRAM in gigabytes. Used to select the best loading strategy.
-        /// f16 model fits: standard load (dequant at load time, fastest inference).
-        /// Only quantized bytes fit: GPU-quantized (bytes stay in VRAM, dequant per forward pass).
+        /// Quantized bytes fit in budget: GPU-quantized (bytes stay in VRAM, dequant per forward pass).
         /// Neither fits: CPU-offloaded (quantized bytes in RAM, dequant on CPU).
         /// Without this flag, quantized GGUFs default to GPU-quantized on GPU backends.
         #[arg(long, value_name = "GB")]
@@ -304,39 +303,39 @@ fn load_gguf_input(
         _ => "gemma4".to_string(),
     };
 
-    let is_gpu_quant_type = file
-        .tensor_info("blk.0.attn_q.weight")
-        .is_some_and(|info| info.ggml_type.is_gpu_quant_supported());
+    let vram_budget = vram_gb.map(|gb| (gb * 0.85 * 1024.0 * 1024.0 * 1024.0) as u64);
+    let (f16_bytes, quantized_bytes) = file.estimated_vram_bytes();
 
-    let is_quantized = file
-        .tensor_info("blk.0.attn_q.weight")
-        .is_some_and(|info| !matches!(info.ggml_type, GgmlType::F32 | GgmlType::F16));
-
-    let strategy = if let Some(vram) = vram_gb {
-        // 85% of user-reported VRAM as budget; remainder reserved for KV cache + activations
-        let budget = (vram * 1024.0 * 1024.0 * 1024.0 * 0.85) as u64;
-        let (f16_bytes, quant_bytes) = file.estimated_vram_bytes();
+    if let Some(budget) = vram_budget {
         eprintln!(
             "Model size: {:.1} GB f16, {:.1} GB quantized  (budget: {:.1} GB)",
             f16_bytes as f64 / 1e9,
-            quant_bytes as f64 / 1e9,
+            quantized_bytes as f64 / 1e9,
             budget as f64 / 1e9,
         );
-        if f16_bytes <= budget {
-            GgufLoadStrategy::Standard
-        } else if gpu_quant_available && is_gpu_quant_type && quant_bytes <= budget {
-            GgufLoadStrategy::GpuQuant
-        } else {
-            GgufLoadStrategy::CpuOffload
+    }
+
+    // TODO: auto-detect VRAM via wgpu adapter when vram_budget is None
+    let strategy = match vram_budget {
+        Some(budget) => {
+            if quantized_bytes <= budget {
+                // Whole model fits as quantized bytes — use GPU quant (best of both worlds)
+                if gpu_quant_available {
+                    GgufLoadStrategy::GpuQuant
+                } else {
+                    GgufLoadStrategy::Standard
+                }
+            } else {
+                GgufLoadStrategy::CpuOffload
+            }
         }
-    } else {
-        // No VRAM hint: default heuristic
-        if gpu_quant_available && is_gpu_quant_type {
-            GgufLoadStrategy::GpuQuant
-        } else if is_quantized {
-            GgufLoadStrategy::CpuOffload
-        } else {
-            GgufLoadStrategy::Standard
+        None => {
+            // No VRAM hint — heuristic: GPU quant if supported, else Standard
+            if gpu_quant_available {
+                GgufLoadStrategy::GpuQuant
+            } else {
+                GgufLoadStrategy::Standard
+            }
         }
     };
 

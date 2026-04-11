@@ -878,6 +878,7 @@ pub fn load_gemma4_gguf_offloaded<B: Backend, P: AsRef<Path>>(
         offloaded_layers.push(LayerOffload {
             attention: load_attention_offload::<B>(&file, i)?,
             dense_ffn: dense_ffn_offload,
+            gpu_experts: None,
         });
     }
 
@@ -950,6 +951,38 @@ where
     }
 }
 
+/// Wrapper giving `GpuQuantizedFusedExperts<R>` the
+/// `FusedExpertForward<CubeBackend<R,F,I,BT>>` interface.
+#[cfg(feature = "cubecl")]
+#[allow(dead_code)]
+struct GpuFusedExpertsWrap<
+    R: sketchpad_cubecl::CubeRuntime,
+    F: sketchpad_cubecl::FloatElement,
+    I: sketchpad_cubecl::IntElement,
+    BT: sketchpad_cubecl::BoolElement,
+> {
+    inner: sketchpad_cubecl::GpuQuantizedFusedExperts<R>,
+    _ph: std::marker::PhantomData<(F, I, BT)>,
+}
+
+#[cfg(feature = "cubecl")]
+impl<R, F, I, BT> crate::quantized::FusedExpertForward<sketchpad_cubecl::CubeBackend<R, F, I, BT>>
+    for GpuFusedExpertsWrap<R, F, I, BT>
+where
+    R: sketchpad_cubecl::CubeRuntime + Send + Sync,
+    F: sketchpad_cubecl::FloatElement,
+    I: sketchpad_cubecl::IntElement,
+    BT: sketchpad_cubecl::BoolElement,
+{
+    fn forward_expert(
+        &self,
+        expert_idx: usize,
+        input: Tensor<sketchpad_cubecl::CubeBackend<R, F, I, BT>, 3>,
+    ) -> Tensor<sketchpad_cubecl::CubeBackend<R, F, I, BT>, 3> {
+        self.inner.forward_expert::<F, I, BT>(expert_idx, input)
+    }
+}
+
 /// Load Gemma 4 from GGUF with attention and dense FFN weights kept in VRAM as
 /// packed quantized bytes, dequantized per-token on the GPU.
 ///
@@ -984,7 +1017,7 @@ where
     P: AsRef<Path>,
 {
     use burn::nn::LinearConfig;
-    use sketchpad_cubecl::{GpuQuantType, GpuQuantizedLinear};
+    use sketchpad_cubecl::{GpuQuantType, GpuQuantizedFusedExperts, GpuQuantizedLinear};
 
     type B<R, F, I, BT> = sketchpad_cubecl::CubeBackend<R, F, I, BT>;
 
@@ -1105,10 +1138,67 @@ where
             head_dim,
         };
 
-        let (ffn, dense_ffn_offload) = if config.is_moe_layer(i) {
+        let (ffn, dense_ffn_offload, gpu_experts_opt) = if config.is_moe_layer(i) {
+            // Build GPU-quantized experts from the fused GGUF tensors.
+            // `load_moe` keeps experts as CPU-mmap'd `QuantizedFusedExperts` (used as
+            // placeholder); the GPU path is routed through `gpu_experts` in LayerOffload.
+            let gate_up_name = format!("blk.{i}.ffn_gate_up_exps.weight");
+            let down_name = format!("blk.{i}.ffn_down_exps.weight");
+            let gpu_experts_box: Option<
+                Box<dyn crate::quantized::FusedExpertForward<B<R, F, I, BT>>>,
+            > = if file.contains(&gate_up_name) {
+                let gate_up_info = file
+                    .tensor_info(&gate_up_name)
+                    .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(gate_up_name.clone()))?;
+                let down_info = file
+                    .tensor_info(&down_name)
+                    .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(down_name.clone()))?;
+
+                let gate_up_qt = match gate_up_info.ggml_type {
+                    GgmlType::Q8_0 => GpuQuantType::Q8_0,
+                    GgmlType::Q4K => GpuQuantType::Q4K,
+                    GgmlType::Q2K => GpuQuantType::Q2K,
+                    GgmlType::Q3K => GpuQuantType::Q3K,
+                    other => return Err(Gemma4GgufLoadError::UnsupportedQuantType(other)),
+                };
+                let down_qt = match down_info.ggml_type {
+                    GgmlType::Q8_0 => GpuQuantType::Q8_0,
+                    GgmlType::Q4K => GpuQuantType::Q4K,
+                    GgmlType::Q2K => GpuQuantType::Q2K,
+                    GgmlType::Q3K => GpuQuantType::Q3K,
+                    other => return Err(Gemma4GgufLoadError::UnsupportedQuantType(other)),
+                };
+
+                let (gate_up_bytes, _) = file.tensor_raw_data(&gate_up_name)?;
+                let (down_bytes, _) = file.tensor_raw_data(&down_name)?;
+
+                let inner = GpuQuantizedFusedExperts::from_bytes(
+                    gate_up_bytes,
+                    gate_up_qt,
+                    down_bytes,
+                    down_qt,
+                    config.num_experts,
+                    config.expert_intermediate_size,
+                    config.hidden_size,
+                    &client,
+                    device,
+                    dtype,
+                );
+                Some(Box::new(GpuFusedExpertsWrap::<R, F, I, BT> {
+                    inner,
+                    _ph: std::marker::PhantomData,
+                })
+                    as Box<
+                        dyn crate::quantized::FusedExpertForward<B<R, F, I, BT>>,
+                    >)
+            } else {
+                None
+            };
+
             (
                 Gemma4Ffn::Moe(load_moe::<B<R, F, I, BT>>(&file, i, &config, device)?),
                 None,
+                gpu_experts_box,
             )
         } else {
             let inter = config.intermediate_size;
@@ -1122,7 +1212,7 @@ where
                 up_proj: dummy(device),
                 down_proj: dummy(device),
             };
-            (Gemma4Ffn::Dense(dense), Some(ffn_offload))
+            (Gemma4Ffn::Dense(dense), Some(ffn_offload), None)
         };
 
         let layer_output_scale = if file.contains(&format!("blk.{i}.layer_output_scale.weight")) {
@@ -1147,6 +1237,7 @@ where
         offloaded_layers.push(crate::quantized::LayerOffload {
             attention: attention_offload,
             dense_ffn: dense_ffn_offload,
+            gpu_experts: gpu_experts_opt,
         });
     }
 

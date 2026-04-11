@@ -384,14 +384,33 @@ pub struct DenseFfnOffload<B: Backend> {
     pub down_proj: Box<dyn LinearForward3d<B>>,
 }
 
+/// Trait for fused expert forward dispatch.
+///
+/// Implemented by `QuantizedFusedExperts` (CPU path) and `GpuQuantizedFusedExperts<R>`
+/// (GPU path, via a wrapper in the loader). Stored as a trait object in `LayerOffload`
+/// so the MoE forward pass can dispatch either path without knowing the concrete type.
+pub trait FusedExpertForward<B: Backend>: Send + Sync {
+    fn forward_expert(&self, expert_idx: usize, input: Tensor<B, 3>) -> Tensor<B, 3>;
+}
+
+impl<B: Backend> FusedExpertForward<B> for QuantizedFusedExperts {
+    fn forward_expert(&self, expert_idx: usize, input: Tensor<B, 3>) -> Tensor<B, 3> {
+        self.forward_expert(expert_idx, input)
+    }
+}
+
 /// Offloaded weights for a single transformer layer.
 ///
-/// MoE expert weights are excluded — they are already zero-copy mmap'd
-/// via `QuantizedFusedExperts`, so they don't need a separate offload path.
+/// MoE expert weights live here when the GPU-quantized path is used. In the
+/// CPU-quantized path the experts are zero-copy mmap'd via `QuantizedFusedExperts`
+/// inside `ExpertWeights::Quantized`, so this field is `None`.
 pub struct LayerOffload<B: Backend> {
     pub attention: AttentionOffload<B>,
-    /// Dense FFN offload. `None` for MoE layers (experts are already zero-copy).
+    /// Dense FFN offload. `None` for MoE layers.
     pub dense_ffn: Option<DenseFfnOffload<B>>,
+    /// GPU-quantized MoE experts. When set, the MoE forward pass uses this
+    /// instead of `ExpertWeights` in the model struct.
+    pub gpu_experts: Option<Box<dyn FusedExpertForward<B>>>,
 }
 
 /// Matrix multiply without allocating a `QuantizedTensor`.

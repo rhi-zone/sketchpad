@@ -522,6 +522,126 @@ pub fn dequantize_q3k<R: CubeRuntime>(
 }
 
 // ============================================================================
+// GpuQuantizedFusedExperts
+// ============================================================================
+
+/// Per-expert gate+up and down projections stored in VRAM as packed quantized bytes.
+///
+/// Mirrors `QuantizedFusedExperts` but keeps all weights on the GPU device. Each
+/// expert has its own `GpuQuantizedLinear` so the GPU-side forward path needs no
+/// `.to_data()` round-trips.
+///
+/// Byte layout matches `QuantizedFusedExperts`: experts are contiguous, so expert
+/// `i` occupies bytes `[i * bytes_per_expert .. (i+1) * bytes_per_expert]` in the
+/// flat mmap slice.
+#[allow(dead_code)]
+pub struct GpuQuantizedFusedExperts<R: CubeRuntime> {
+    gate_up: Vec<GpuQuantizedLinear<R>>,
+    down: Vec<GpuQuantizedLinear<R>>,
+    expert_inter: usize,
+    hidden_size: usize,
+}
+
+#[allow(dead_code)]
+impl<R: CubeRuntime> GpuQuantizedFusedExperts<R> {
+    /// Upload all expert weights to VRAM and create one `GpuQuantizedLinear` per expert.
+    ///
+    /// `gate_up_bytes` — full fused gate+up tensor for all experts (row-major,
+    ///   `num_experts × expert_inter×2` rows, each row `hidden_size` elements wide).
+    /// `down_bytes` — full fused down tensor for all experts (row-major,
+    ///   `num_experts × hidden_size` rows, each row `expert_inter` elements wide).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_bytes(
+        gate_up_bytes: &[u8],
+        gate_up_type: GpuQuantType,
+        down_bytes: &[u8],
+        down_type: GpuQuantType,
+        num_experts: usize,
+        expert_inter: usize,
+        hidden_size: usize,
+        client: &cubecl::client::ComputeClient<R>,
+        device: &R::Device,
+        dtype: burn::tensor::DType,
+    ) -> Self {
+        let gate_up_rows_per_expert = expert_inter * 2;
+        let down_rows_per_expert = hidden_size;
+
+        let gate_up_bytes_per_expert = gate_up_bytes.len() / num_experts;
+        let down_bytes_per_expert = down_bytes.len() / num_experts;
+
+        let gate_up: Vec<GpuQuantizedLinear<R>> = (0..num_experts)
+            .map(|i| {
+                let start = i * gate_up_bytes_per_expert;
+                let end = start + gate_up_bytes_per_expert;
+                GpuQuantizedLinear::from_bytes(
+                    &gate_up_bytes[start..end],
+                    gate_up_type,
+                    gate_up_rows_per_expert,
+                    hidden_size,
+                    client,
+                    device,
+                    dtype,
+                )
+            })
+            .collect();
+
+        let down: Vec<GpuQuantizedLinear<R>> = (0..num_experts)
+            .map(|i| {
+                let start = i * down_bytes_per_expert;
+                let end = start + down_bytes_per_expert;
+                GpuQuantizedLinear::from_bytes(
+                    &down_bytes[start..end],
+                    down_type,
+                    down_rows_per_expert,
+                    expert_inter,
+                    client,
+                    device,
+                    dtype,
+                )
+            })
+            .collect();
+
+        Self {
+            gate_up,
+            down,
+            expert_inter,
+            hidden_size,
+        }
+    }
+
+    /// Run a single expert's GeGLU FFN on the input.
+    ///
+    /// Input: `[n_tokens, 1, hidden_size]`
+    /// Output: `[n_tokens, 1, hidden_size]`
+    ///
+    /// All computation stays on the GPU — no `.to_data()` calls.
+    pub fn forward_expert<F, I, BT>(
+        &self,
+        expert_idx: usize,
+        input: burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 3>,
+    ) -> burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 3>
+    where
+        F: burn_cubecl::FloatElement,
+        I: burn_cubecl::IntElement,
+        BT: burn_cubecl::BoolElement,
+    {
+        // gate_up: [n_tokens, 1, expert_inter * 2]
+        let gate_up_out = self.gate_up[expert_idx].forward_burn(input);
+
+        // Split into gate and up halves along the last dimension
+        let expert_inter = self.expert_inter;
+        let gate = gate_up_out.clone().narrow(2, 0, expert_inter);
+        let up = gate_up_out.narrow(2, expert_inter, expert_inter);
+
+        // GeGLU: GELU(gate) * up
+        let hidden = burn::tensor::activation::gelu(gate) * up;
+
+        // Down projection: [n_tokens, 1, hidden_size]
+        self.down[expert_idx].forward_burn(hidden)
+    }
+}
+
+// ============================================================================
 // GpuQuantizedLinear
 // ============================================================================
 

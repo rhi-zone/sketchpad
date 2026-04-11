@@ -28,7 +28,9 @@ use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::{causal_mask, sliding_window_mask};
 
-use crate::quantized::{AttentionOffload, DenseFfnOffload, LayerOffload, QuantizedFusedExperts};
+use crate::quantized::{
+    AttentionOffload, DenseFfnOffload, FusedExpertForward, LayerOffload, QuantizedFusedExperts,
+};
 
 /// Gemma 4 Model Configuration
 #[derive(Debug, Clone)]
@@ -563,7 +565,13 @@ impl<B: Backend> Gemma4MoE<B> {
     /// - `x`: shared expert input (output of layer-level `pre_ffn_norm` applied to `h`)
     /// - `router_raw`: raw hidden state `h` before `pre_ffn_norm`; used for:
     ///   - `pre_ffn_norm_moe(h)` → routed expert input + (scaled) router input
-    pub fn forward(&self, x: Tensor<B, 3>, router_raw: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
+    /// - `gpu_experts`: when set, used instead of `self.experts` for GPU-quantized inference
+    pub fn forward(
+        &self,
+        x: Tensor<B, 3>,
+        router_raw: Option<Tensor<B, 3>>,
+        gpu_experts: Option<&dyn FusedExpertForward<B>>,
+    ) -> Tensor<B, 3> {
         let [batch, seq_len, hidden_size] = x.dims();
         let num_tokens = batch * seq_len;
         let device = x.device();
@@ -605,9 +613,16 @@ impl<B: Backend> Gemma4MoE<B> {
                 &device,
             );
             let expert_input = routed_flat.clone().reshape([num_tokens, 1, hidden_size]);
-            let expert_out = match &self.experts {
-                ExpertWeights::Full(experts) => experts[expert_idx].forward(expert_input),
-                ExpertWeights::Quantized(fused) => fused.forward_expert(expert_idx, expert_input),
+            // GPU-quantized experts take priority; fall back to model's ExpertWeights
+            let expert_out = if let Some(gpu) = gpu_experts {
+                gpu.forward_expert(expert_idx, expert_input)
+            } else {
+                match &self.experts {
+                    ExpertWeights::Full(experts) => experts[expert_idx].forward(expert_input),
+                    ExpertWeights::Quantized(fused) => {
+                        fused.forward_expert(expert_idx, expert_input)
+                    }
+                }
             };
             let mut expert_out = expert_out.reshape([num_tokens, hidden_size]);
             // Per-expert output scale (`ffnDownExpsScale[expert_idx]`)
@@ -702,10 +717,11 @@ impl<B: Backend> Gemma4Ffn<B> {
         x: Tensor<B, 3>,
         router_raw: Option<Tensor<B, 3>>,
         ffn_offload: Option<&DenseFfnOffload<B>>,
+        gpu_experts: Option<&dyn FusedExpertForward<B>>,
     ) -> Tensor<B, 3> {
         match self {
             Self::Dense(ffn) => ffn.forward(x, ffn_offload),
-            Self::Moe(moe) => moe.forward(x, router_raw),
+            Self::Moe(moe) => moe.forward(x, router_raw, gpu_experts),
         }
     }
 }
@@ -797,6 +813,8 @@ impl<B: Backend> Gemma4Layer<B> {
         let rope = &ropes[&self.attention.head_dim];
         let attn_offload = layer_offload.map(|lo| &lo.attention);
         let ffn_offload = layer_offload.and_then(|lo| lo.dense_ffn.as_ref());
+        let gpu_experts: Option<&dyn FusedExpertForward<B>> =
+            layer_offload.and_then(|lo| lo.gpu_experts.as_deref());
 
         // Pre-norm attention
         let normed = self.input_norm.forward(x.clone());
@@ -832,7 +850,9 @@ impl<B: Backend> Gemma4Layer<B> {
 
         // Pre-FFN norm — h (raw) is passed as router_raw so MoE can use its own normalization
         let normed = self.pre_ffn_norm.forward(h.clone());
-        let ffn_out = self.ffn.forward(normed, Some(h.clone()), ffn_offload);
+        let ffn_out = self
+            .ffn
+            .forward(normed, Some(h.clone()), ffn_offload, gpu_experts);
         // Post-FFN norm + residual (scaled if layer_output_scale != 1.0)
         let ffn_residual = self.post_ffn_norm.forward(ffn_out);
         if self.layer_output_scale == 1.0 {
@@ -1158,7 +1178,7 @@ mod tests {
         let moe = Gemma4MoE::new(64, 128, 128, 4, 1, 2, &device);
 
         let x = Tensor::<TestBackend, 3>::zeros([1, 4, 64], &device);
-        let out = moe.forward(x, None);
+        let out = moe.forward(x, None, None);
 
         assert_eq!(out.dims(), [1, 4, 64]);
     }
