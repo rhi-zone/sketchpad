@@ -340,7 +340,7 @@ See `docs/cubecl-guide.md` for implementation details.
 #### Memory / Offloading (GGUF inference)
 - [ ] **Zero-copy expert bytes**: `QuantizedFusedExperts` currently copies expert bytes out of the mmap into `Vec<u8>`. Add a lifetime parameter `QuantizedFusedExperts<'a>` with `gate_up_data: &'a [u8]` so expert data stays in the OS page cache (disk offloading for free, evictable under memory pressure). The loader keeps `GgufFile` alive alongside the model.
 - [ ] **CPU offloading flag** (`--offload-weights`): a `QuantizedLinear` struct analogous to `QuantizedFusedExperts` that keeps attention/FFN weight bytes in RAM and uploads to GPU per token. Usable when VRAM is the hard constraint and speed is acceptable. Needs CLI flag; expert weights are already offloaded.
-- [ ] **GPU-side quantized matmul** for attention weights: keep Q4K/Q8 bytes in VRAM, dequantize inside a WGSL compute shader (what llama.cpp does). 4-8x VRAM savings for non-expert weights vs f16. Requires custom CubeCL/WGSL kernel — significant effort but the right long-term path for fitting 27B+ on consumer VRAM.
+- [ ] **GPU-side quantized matmul** for attention weights: keep Q4K/Q8 bytes in VRAM, dequantize inside a compute kernel (what llama.cpp does). 4-8x VRAM savings for non-expert weights vs f16. Implement in `sketchpad-cubecl` using CubeCL — compiles to HIP for ROCm (7900 XTX native), CUDA for NVIDIA, WGPU/Vulkan as fallback. Same kernel, all backends. Enable `hip` feature in cubecl dep.
 
 ### Shared Building Blocks (burn-models-core)
 
