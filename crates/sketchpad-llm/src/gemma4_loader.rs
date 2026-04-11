@@ -257,11 +257,28 @@ fn load_gemma4_attention<B: Backend>(
         device,
     )?;
 
+    let q_norm = load_rmsnorm(
+        file,
+        &format!("{}.self_attn.q_norm.weight", prefix),
+        config.head_dim,
+        config.norm_eps,
+        device,
+    )?;
+    let k_norm = load_rmsnorm(
+        file,
+        &format!("{}.self_attn.k_norm.weight", prefix),
+        config.head_dim,
+        config.norm_eps,
+        device,
+    )?;
+
     Ok(Gemma4Attention {
         q_proj,
         k_proj,
         v_proj,
         o_proj,
+        q_norm,
+        k_norm,
         num_heads: config.num_heads,
         num_kv_heads: config.num_kv_heads,
         head_dim: config.head_dim,

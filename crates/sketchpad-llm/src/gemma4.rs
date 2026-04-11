@@ -203,6 +203,8 @@ impl Gemma4LayerConfig {
             o_proj: LinearConfig::new(q_dim, self.hidden_size)
                 .with_bias(false)
                 .init(device),
+            q_norm: RmsNorm::with_eps(self.head_dim, self.norm_eps, device),
+            k_norm: RmsNorm::with_eps(self.head_dim, self.norm_eps, device),
             num_heads: self.num_heads,
             num_kv_heads: self.num_kv_heads,
             head_dim: self.head_dim,
@@ -251,6 +253,8 @@ pub struct Gemma4Attention<B: Backend> {
     pub k_proj: Linear<B>,
     pub v_proj: Linear<B>,
     pub o_proj: Linear<B>,
+    pub q_norm: RmsNorm<B>,
+    pub k_norm: RmsNorm<B>,
     pub num_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
@@ -299,12 +303,15 @@ impl<B: Backend> Gemma4Attention<B> {
         let k = self.k_proj.forward(x.clone());
         let v = self.v_proj.forward(x);
 
-        let q = q
-            .reshape([batch, seq_len, self.num_heads, self.head_dim])
-            .swap_dims(1, 2);
-        let k = k
-            .reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
-            .swap_dims(1, 2);
+        // Reshape to [batch, seq_len, num_heads, head_dim] and apply per-head Q/K norms
+        let q = q.reshape([batch, seq_len, self.num_heads, self.head_dim]);
+        let q = self.q_norm.forward(q);
+        let q = q.swap_dims(1, 2);
+
+        let k = k.reshape([batch, seq_len, self.num_kv_heads, self.head_dim]);
+        let k = self.k_norm.forward(k);
+        let k = k.swap_dims(1, 2);
+
         let v = v
             .reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
             .swap_dims(1, 2);
@@ -757,6 +764,7 @@ impl<B: Backend> Gemma4<B> {
                 };
 
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
+                    let layer_start = std::time::Instant::now();
                     hidden_states = layer.forward_cached(
                         hidden_states,
                         &runtime.ropes,
@@ -766,6 +774,11 @@ impl<B: Backend> Gemma4<B> {
                         runtime.config.attn_logit_softcap,
                         cache,
                         layer_idx,
+                    );
+                    eprintln!(
+                        "  layer {layer_idx}/{}: {:.2}s",
+                        self.layers.len(),
+                        layer_start.elapsed().as_secs_f64()
                     );
                 }
             }

@@ -372,11 +372,28 @@ fn load_attention<B: Backend>(
 
     let o_proj = load_linear(file, &o_name, q_dim, config.hidden_size, device)?;
 
+    let q_norm = load_rmsnorm(
+        file,
+        &format!("blk.{idx}.attn_q_norm.weight"),
+        head_dim,
+        config.norm_eps,
+        device,
+    )?;
+    let k_norm = load_rmsnorm(
+        file,
+        &format!("blk.{idx}.attn_k_norm.weight"),
+        head_dim,
+        config.norm_eps,
+        device,
+    )?;
+
     Ok(Gemma4Attention {
         q_proj,
         k_proj,
         v_proj,
         o_proj,
+        q_norm,
+        k_norm,
         num_heads,
         num_kv_heads,
         head_dim,
