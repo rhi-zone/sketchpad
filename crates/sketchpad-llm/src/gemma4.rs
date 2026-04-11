@@ -33,8 +33,10 @@ pub struct Gemma4Config {
     pub vocab_size: usize,
     /// Hidden dimension
     pub hidden_size: usize,
-    /// Intermediate (FFN) dimension per expert / dense FFN
+    /// Intermediate (FFN) dimension for shared/dense FFN
     pub intermediate_size: usize,
+    /// Intermediate (FFN) dimension for routed experts (may differ from shared)
+    pub expert_intermediate_size: usize,
     /// Number of transformer layers
     pub num_layers: usize,
     /// Number of attention heads
@@ -66,19 +68,20 @@ pub struct Gemma4Config {
 }
 
 impl Gemma4Config {
-    /// Gemma 4 26B-A4B configuration
+    /// Gemma 4 26B-A4B configuration (from GGUF metadata)
     pub fn gemma4_27b() -> Self {
-        // MoE on every other layer starting from 1 (odd layers)
-        let moe_layers: Vec<usize> = (0..30).filter(|i| i % 2 == 1).collect();
+        // All layers are MoE in the 26B-A4B variant
+        let moe_layers: Vec<usize> = (0..30).collect();
 
         Self {
             vocab_size: 262144,
-            hidden_size: 3840,
-            intermediate_size: 24576,
+            hidden_size: 2816,
+            intermediate_size: 2112,       // shared/dense FFN
+            expert_intermediate_size: 704, // routed expert FFN
             num_layers: 30,
-            num_heads: 32,
+            num_heads: 16,
             num_kv_heads: 8,
-            head_dim: 128,
+            head_dim: 512,
             max_seq_len: 8192,
             sliding_window: 1024,
             attn_logit_softcap: 50.0,
@@ -98,6 +101,7 @@ impl Gemma4Config {
             vocab_size: 1000,
             hidden_size: 128,
             intermediate_size: 256,
+            expert_intermediate_size: 64,
             num_layers: 4, // Need at least 4 to test interleaving
             num_heads: 4,
             num_kv_heads: 2,
@@ -127,6 +131,7 @@ impl Gemma4Config {
                 Gemma4LayerConfig {
                     hidden_size: self.hidden_size,
                     intermediate_size: self.intermediate_size,
+                    expert_intermediate_size: self.expert_intermediate_size,
                     num_heads: self.num_heads,
                     num_kv_heads: self.num_kv_heads,
                     head_dim: self.head_dim,
@@ -164,6 +169,7 @@ impl Gemma4Config {
 struct Gemma4LayerConfig {
     hidden_size: usize,
     intermediate_size: usize,
+    expert_intermediate_size: usize,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -201,6 +207,7 @@ impl Gemma4LayerConfig {
         let ffn = if self.is_moe {
             Gemma4Ffn::Moe(Gemma4MoE::new(
                 self.hidden_size,
+                self.expert_intermediate_size,
                 self.intermediate_size,
                 self.num_experts,
                 self.num_shared_experts,
@@ -406,7 +413,8 @@ pub struct Gemma4MoE<B: Backend> {
 impl<B: Backend> Gemma4MoE<B> {
     fn new(
         hidden_size: usize,
-        intermediate_size: usize,
+        expert_intermediate_size: usize,
+        shared_intermediate_size: usize,
         num_experts: usize,
         num_shared_experts: usize,
         top_k: usize,
@@ -418,13 +426,13 @@ impl<B: Backend> Gemma4MoE<B> {
 
         let experts = (0..num_experts)
             .map(|_| Gemma4ExpertFfn {
-                gate_proj: LinearConfig::new(hidden_size, intermediate_size)
+                gate_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
                     .with_bias(false)
                     .init(device),
-                up_proj: LinearConfig::new(hidden_size, intermediate_size)
+                up_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
                     .with_bias(false)
                     .init(device),
-                down_proj: LinearConfig::new(intermediate_size, hidden_size)
+                down_proj: LinearConfig::new(expert_intermediate_size, hidden_size)
                     .with_bias(false)
                     .init(device),
             })
@@ -432,13 +440,13 @@ impl<B: Backend> Gemma4MoE<B> {
 
         let shared_experts = (0..num_shared_experts)
             .map(|_| Gemma4ExpertFfn {
-                gate_proj: LinearConfig::new(hidden_size, intermediate_size)
+                gate_proj: LinearConfig::new(hidden_size, shared_intermediate_size)
                     .with_bias(false)
                     .init(device),
-                up_proj: LinearConfig::new(hidden_size, intermediate_size)
+                up_proj: LinearConfig::new(hidden_size, shared_intermediate_size)
                     .with_bias(false)
                     .init(device),
-                down_proj: LinearConfig::new(intermediate_size, hidden_size)
+                down_proj: LinearConfig::new(shared_intermediate_size, hidden_size)
                     .with_bias(false)
                     .init(device),
             })
@@ -967,7 +975,7 @@ mod tests {
     fn test_gemma4_moe_ffn() {
         let device = Default::default();
 
-        let moe = Gemma4MoE::new(64, 128, 4, 1, 2, &device);
+        let moe = Gemma4MoE::new(64, 128, 128, 4, 1, 2, &device);
 
         let x = Tensor::<TestBackend, 3>::zeros([1, 4, 64], &device);
         let out = moe.forward(x);

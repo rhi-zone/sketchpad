@@ -317,20 +317,20 @@ fn load_gemma4_moe<B: Backend>(
         .init(device);
     router.weight = Param::from_tensor(router_weight);
 
-    // Load routed experts
+    // Load routed experts (use expert_intermediate_size)
     let mut experts = Vec::with_capacity(config.num_experts);
     for e in 0..config.num_experts {
         let expert = load_expert_ffn(
             file,
             &format!("{}.block_sparse_moe.experts.{}", prefix, e),
             config.hidden_size,
-            config.intermediate_size,
+            config.expert_intermediate_size,
             device,
         )?;
         experts.push(expert);
     }
 
-    // Load shared experts
+    // Load shared experts (use intermediate_size — shared/dense FFN size)
     let mut shared_experts = Vec::with_capacity(config.num_shared_experts);
     if config.num_shared_experts == 1 {
         let shared = load_expert_ffn(

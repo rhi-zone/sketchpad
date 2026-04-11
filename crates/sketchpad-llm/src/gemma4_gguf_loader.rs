@@ -102,9 +102,21 @@ pub fn parse_gguf_config(file: &GgufFile) -> Result<Gemma4Config, Gemma4GgufLoad
         if num_experts > 0 { 8 } else { 1 },
     ) as usize;
 
-    // Determine MoE layers: if experts exist, odd layers are MoE by default
+    let intermediate_size =
+        meta_u64_or(file, &format!("{arch}.feed_forward_length"), 24576) as usize;
+
+    // Expert intermediate size may differ from shared/dense FFN size
+    let expert_intermediate_size = meta_u64_or(
+        file,
+        &format!("{arch}.expert_feed_forward_length"),
+        intermediate_size as u64,
+    ) as usize;
+
+    // Determine MoE layers by checking which layers have expert tensors
     let moe_layers = if num_experts > 0 {
-        (0..num_layers).filter(|i| i % 2 == 1).collect()
+        (0..num_layers)
+            .filter(|i| file.contains(&format!("blk.{i}.ffn_gate_up_exps.weight")))
+            .collect()
     } else {
         Vec::new()
     };
@@ -115,8 +127,8 @@ pub fn parse_gguf_config(file: &GgufFile) -> Result<Gemma4Config, Gemma4GgufLoad
     Ok(Gemma4Config {
         vocab_size: meta_u64_or(file, &format!("{arch}.vocab_size"), 262144) as usize,
         hidden_size,
-        intermediate_size: meta_u64_or(file, &format!("{arch}.feed_forward_length"), 24576)
-            as usize,
+        intermediate_size,
+        expert_intermediate_size,
         num_layers,
         num_heads,
         num_kv_heads,
@@ -381,53 +393,57 @@ fn load_moe<B: Backend>(
     )?;
 
     // GGUF stores experts as fused tensors:
-    // ffn_gate_up_exps.weight: [num_experts, intermediate_size * 2, hidden_size]
-    // ffn_down_exps.weight:    [num_experts, hidden_size, intermediate_size]
+    // ffn_gate_up_exps.weight: [hidden_size, expert_inter * 2, num_experts]
+    // ffn_down_exps.weight:    [expert_inter, hidden_size, num_experts]
+    // (expert dimension is last — GGML row-major with least-significant dim first)
     let gate_up_name = format!("blk.{idx}.ffn_gate_up_exps.weight");
     let down_name = format!("blk.{idx}.ffn_down_exps.weight");
+
+    let expert_inter = config.expert_intermediate_size;
 
     let experts = if file.contains(&gate_up_name) {
         // Load fused expert tensors and split per-expert
         let gate_up_all: Tensor<B, 3> = file.load_f32(&gate_up_name, device)?;
         let down_all: Tensor<B, 3> = file.load_f32(&down_name, device)?;
 
+        eprintln!(
+            "  gate_up_exps shape: {:?}, down_exps shape: {:?}",
+            gate_up_all.dims(),
+            down_all.dims()
+        );
+
         let mut experts = Vec::with_capacity(config.num_experts);
         for e in 0..config.num_experts {
-            // Slice out this expert's weights
+            // Slice expert e from last dimension
+            // gate_up: [hidden_size, expert_inter*2, 1] → [hidden_size, expert_inter*2]
             let gate_up = gate_up_all
                 .clone()
-                .slice([
-                    e..e + 1,
-                    0..config.intermediate_size * 2,
-                    0..config.hidden_size,
-                ])
-                .reshape([config.intermediate_size * 2, config.hidden_size]);
+                .slice([0..config.hidden_size, 0..expert_inter * 2, e..e + 1])
+                .reshape([config.hidden_size, expert_inter * 2]);
 
-            // Split gate and up from fused tensor
+            // Split gate and up: gate is first half, up is second half of dim 1
             let gate_weight = gate_up
                 .clone()
-                .slice([0..config.intermediate_size, 0..config.hidden_size]);
-            let up_weight = gate_up.slice([
-                config.intermediate_size..config.intermediate_size * 2,
-                0..config.hidden_size,
-            ]);
+                .slice([0..config.hidden_size, 0..expert_inter]);
+            let up_weight = gate_up.slice([0..config.hidden_size, expert_inter..expert_inter * 2]);
 
+            // down: [expert_inter, hidden_size, 1] → [expert_inter, hidden_size]
             let down_weight = down_all
                 .clone()
-                .slice([e..e + 1, 0..config.hidden_size, 0..config.intermediate_size])
-                .reshape([config.hidden_size, config.intermediate_size]);
+                .slice([0..expert_inter, 0..config.hidden_size, e..e + 1])
+                .reshape([expert_inter, config.hidden_size]);
 
-            let mut gate_proj = LinearConfig::new(config.hidden_size, config.intermediate_size)
+            let mut gate_proj = LinearConfig::new(config.hidden_size, expert_inter)
                 .with_bias(false)
                 .init(device);
             gate_proj.weight = Param::from_tensor(gate_weight);
 
-            let mut up_proj = LinearConfig::new(config.hidden_size, config.intermediate_size)
+            let mut up_proj = LinearConfig::new(config.hidden_size, expert_inter)
                 .with_bias(false)
                 .init(device);
             up_proj.weight = Param::from_tensor(up_weight);
 
-            let mut down_proj = LinearConfig::new(config.intermediate_size, config.hidden_size)
+            let mut down_proj = LinearConfig::new(expert_inter, config.hidden_size)
                 .with_bias(false)
                 .init(device);
             down_proj.weight = Param::from_tensor(down_weight);
@@ -448,20 +464,20 @@ fn load_moe<B: Backend>(
                     file,
                     &format!("blk.{idx}.ffn_gate.{e}.weight"),
                     config.hidden_size,
-                    config.intermediate_size,
+                    expert_inter,
                     device,
                 )?,
                 up_proj: load_linear(
                     file,
                     &format!("blk.{idx}.ffn_up.{e}.weight"),
                     config.hidden_size,
-                    config.intermediate_size,
+                    expert_inter,
                     device,
                 )?,
                 down_proj: load_linear(
                     file,
                     &format!("blk.{idx}.ffn_down.{e}.weight"),
-                    config.intermediate_size,
+                    expert_inter,
                     config.hidden_size,
                     device,
                 )?,

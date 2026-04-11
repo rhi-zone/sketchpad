@@ -662,10 +662,15 @@ fn parse_gemma4_config(json: &str) -> Result<Gemma4Config, LlmError> {
         Vec::new()
     };
 
+    let intermediate_size = v["intermediate_size"].as_u64().unwrap_or(24576) as usize;
+
     Ok(Gemma4Config {
         vocab_size: v["vocab_size"].as_u64().unwrap_or(262144) as usize,
         hidden_size,
-        intermediate_size: v["intermediate_size"].as_u64().unwrap_or(24576) as usize,
+        intermediate_size,
+        expert_intermediate_size: v["expert_intermediate_size"]
+            .as_u64()
+            .unwrap_or(intermediate_size as u64) as usize,
         num_layers,
         num_heads,
         num_kv_heads: v["num_key_value_heads"].as_u64().unwrap_or(8) as usize,

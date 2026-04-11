@@ -9,7 +9,7 @@ use half::f16;
 use memmap2::MmapOptions;
 use thiserror::Error;
 
-const GGUF_MAGIC: u32 = 0x46475547; // "GGUF" in little-endian
+const GGUF_MAGIC: u32 = 0x46554747; // "GGUF" as bytes [0x47,0x47,0x55,0x46] read as LE u32
 const GGUF_VERSION: u32 = 3;
 const ALIGNMENT: usize = 32;
 
@@ -30,7 +30,7 @@ pub enum GgufError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Invalid GGUF magic: expected 0x46475547, got 0x{0:08X}")]
+    #[error("Invalid GGUF magic: expected 0x46554747, got 0x{0:08X}")]
     InvalidMagic(u32),
 
     #[error("Unsupported GGUF version: {0} (expected {GGUF_VERSION})")]
