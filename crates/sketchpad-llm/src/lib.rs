@@ -103,7 +103,7 @@ pub use gemma::{Gemma, GemmaConfig, GemmaOutput, GemmaRuntime};
 pub use gemma_gguf_loader::{GemmaGgufLoadError, load_gemma_gguf};
 pub use gemma_loader::{GemmaLoadError, load_gemma};
 pub use gemma4::{Gemma4, Gemma4Config, Gemma4Output, Gemma4Runtime};
-pub use gemma4_gguf_loader::{Gemma4GgufLoadError, load_gemma4_gguf};
+pub use gemma4_gguf_loader::{Gemma4GgufLoadError, load_gemma4_gguf, load_gemma4_gguf_offloaded};
 pub use gemma4_loader::{Gemma4LoadError, load_gemma4};
 pub use jamba::{Jamba, JambaConfig, JambaOutput, JambaRuntime, JambaState};
 pub use jamba_loader::{JambaLoadError, load_jamba};
@@ -123,7 +123,10 @@ pub use rwkv::{Rwkv, RwkvConfig, RwkvOutput, RwkvRuntime, RwkvState};
 pub use rwkv_loader::{RwkvLoadError, load_rwkv};
 
 // Re-export quantized types
-pub use quantized::{QuantizedFusedExperts, QuantizedLinear, QuantizedTensor};
+pub use quantized::{
+    AttentionOffload, DenseFfnOffload, LayerOffload, QuantizedFusedExperts, QuantizedLinear,
+    QuantizedTensor,
+};
 
 // Re-export sampling
 pub use sampling::{SamplerConfig, sample_from_logits, sample_token};

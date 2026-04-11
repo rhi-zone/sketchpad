@@ -11,7 +11,7 @@ use clap::{Subcommand, ValueEnum};
 
 use sketchpad_convert::gguf::{GgufFile, MetadataValue};
 use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
-use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf;
+use sketchpad_llm::gemma4_gguf_loader::{load_gemma4_gguf, load_gemma4_gguf_offloaded};
 use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
 use sketchpad_llm::sampling::SamplerConfig;
 use sketchpad_llm::{ChatSession, GenerationConfig, LlmInstance, ModelType};
@@ -141,6 +141,13 @@ pub enum LlmCommands {
         /// On CPU (ndarray), f32 is always used regardless.
         #[arg(long, value_enum, default_value = "f16")]
         precision: crate::Precision,
+
+        /// CPU-offload attention and dense FFN weights.
+        /// Weights stay in RAM as quantized bytes; dequantized per-token on the fly.
+        /// Halves VRAM use at the cost of PCIe bandwidth per token.
+        /// MoE routed experts are already zero-copy mmap'd and are unaffected.
+        #[arg(long, default_value = "false")]
+        offload_weights: bool,
     },
 
     /// Start an OpenAI-compatible HTTP server
@@ -253,6 +260,7 @@ pub fn run_gguf<B: Backend>(
     max_tokens: usize,
     temperature: f32,
     top_p: f32,
+    offload_weights: bool,
     device: &B::Device,
 ) -> Result<()> {
     let path = weights.to_str().context("Invalid path")?;
@@ -310,10 +318,21 @@ pub fn run_gguf<B: Backend>(
             all[seq_len..].iter().map(|&id| id as u32).collect()
         }
         _ => {
-            eprintln!("Loading Gemma 4...");
+            eprintln!(
+                "Loading Gemma 4{}...",
+                if offload_weights {
+                    " (CPU offload)"
+                } else {
+                    ""
+                }
+            );
             let start = std::time::Instant::now();
-            let (model, runtime, _) =
-                load_gemma4_gguf::<B, _>(path, device).context("Failed to load Gemma 4")?;
+            let (model, runtime, _) = if offload_weights {
+                load_gemma4_gguf_offloaded::<B, _>(path, device)
+                    .context("Failed to load Gemma 4 (offloaded)")?
+            } else {
+                load_gemma4_gguf::<B, _>(path, device).context("Failed to load Gemma 4")?
+            };
             eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
 
             let sampler = SamplerConfig {

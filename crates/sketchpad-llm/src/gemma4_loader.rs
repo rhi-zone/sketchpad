@@ -81,6 +81,7 @@ pub fn load_gemma4<B: Backend, P: AsRef<Path>>(
     let runtime = Gemma4Runtime {
         ropes,
         config: config.clone(),
+        offloaded_layers: None,
     };
 
     Ok((model, runtime))

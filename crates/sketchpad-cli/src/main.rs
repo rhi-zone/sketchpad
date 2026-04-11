@@ -413,7 +413,16 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
             temperature,
             top_p,
             precision,
-        } => run_gguf_command(weights, prompt, max_tokens, temperature, top_p, precision),
+            offload_weights,
+        } => run_gguf_command(
+            weights,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            precision,
+            offload_weights,
+        ),
         command => {
             // Non-GGUF LLM commands use f32; GGUF has its own precision dispatch above
             #[cfg(feature = "wgpu")]
@@ -449,6 +458,7 @@ fn run_gguf_command(
     temperature: f32,
     top_p: f32,
     precision: Precision,
+    offload_weights: bool,
 ) -> Result<()> {
     #[cfg(feature = "wgpu")]
     {
@@ -459,19 +469,43 @@ fn run_gguf_command(
             #[cfg(feature = "precision-f32")]
             Precision::F32 => {
                 type B = Wgpu<f32>;
-                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+                llm::run_gguf::<B>(
+                    weights,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    offload_weights,
+                    &device,
+                )
             }
             #[cfg(feature = "precision-f16")]
             Precision::F16 => {
                 use half::f16;
                 type B = Wgpu<f16>;
-                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+                llm::run_gguf::<B>(
+                    weights,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    offload_weights,
+                    &device,
+                )
             }
             #[cfg(feature = "precision-bf16")]
             Precision::Bf16 => {
                 use half::bf16;
                 type B = Wgpu<bf16>;
-                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+                llm::run_gguf::<B>(
+                    weights,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    offload_weights,
+                    &device,
+                )
             }
         }
     }
@@ -482,12 +516,28 @@ fn run_gguf_command(
         use burn_ndarray::NdArray;
         type B = NdArray<f32>;
         let device = Default::default();
-        llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
+        llm::run_gguf::<B>(
+            weights,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            offload_weights,
+            &device,
+        )
     }
 
     #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
     {
-        let _ = (weights, prompt, max_tokens, temperature, top_p, precision);
+        let _ = (
+            weights,
+            prompt,
+            max_tokens,
+            temperature,
+            top_p,
+            precision,
+            offload_weights,
+        );
         anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
     }
 }

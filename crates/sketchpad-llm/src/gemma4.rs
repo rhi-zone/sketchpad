@@ -28,7 +28,7 @@ use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::{causal_mask, sliding_window_mask};
 
-use crate::quantized::QuantizedFusedExperts;
+use crate::quantized::{AttentionOffload, DenseFfnOffload, LayerOffload, QuantizedFusedExperts};
 
 /// Gemma 4 Model Configuration
 #[derive(Debug, Clone)]
@@ -175,6 +175,7 @@ impl Gemma4Config {
         let runtime = Gemma4Runtime {
             ropes,
             config: self.clone(),
+            offloaded_layers: None,
         };
 
         (model, runtime)
@@ -281,7 +282,7 @@ impl<B: Backend> Gemma4Attention<B> {
         mask: Option<Tensor<B, 2>>,
         softcap: f32,
     ) -> Tensor<B, 3> {
-        self.forward_inner(x, rope, start_pos, mask, softcap, None, 0)
+        self.forward_inner(x, rope, start_pos, mask, softcap, None, 0, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -295,7 +296,16 @@ impl<B: Backend> Gemma4Attention<B> {
         cache: &mut dyn AttentionCache<B>,
         layer_idx: usize,
     ) -> Tensor<B, 3> {
-        self.forward_inner(x, rope, start_pos, mask, softcap, Some(cache), layer_idx)
+        self.forward_inner(
+            x,
+            rope,
+            start_pos,
+            mask,
+            softcap,
+            Some(cache),
+            layer_idx,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -308,12 +318,23 @@ impl<B: Backend> Gemma4Attention<B> {
         softcap: f32,
         mut cache: Option<&mut dyn AttentionCache<B>>,
         layer_idx: usize,
+        offload: Option<&AttentionOffload>,
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
+        let device = x.device();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let (q, k, v) = match offload {
+            Some(off) => (
+                off.q_proj.forward(x.clone(), &device),
+                off.k_proj.forward(x.clone(), &device),
+                off.v_proj.forward(x, &device),
+            ),
+            None => (
+                self.q_proj.forward(x.clone()),
+                self.k_proj.forward(x.clone()),
+                self.v_proj.forward(x),
+            ),
+        };
 
         // Reshape to [batch, seq_len, num_heads, head_dim] and apply per-head Q/K norms
         let q = q.reshape([batch, seq_len, self.num_heads, self.head_dim]);
@@ -360,7 +381,10 @@ impl<B: Backend> Gemma4Attention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        match offload {
+            Some(off) => off.o_proj.forward(out, &device),
+            None => self.o_proj.forward(out),
+        }
     }
 
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -389,11 +413,23 @@ pub struct Gemma4DenseFfn<B: Backend> {
 }
 
 impl<B: Backend> Gemma4DenseFfn<B> {
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<B, 3>, offload: Option<&DenseFfnOffload>) -> Tensor<B, 3> {
+        let device = x.device();
         // GeGLU: GELU(gate) * up
-        let gate = burn::tensor::activation::gelu(self.gate_proj.forward(x.clone()));
-        let up = self.up_proj.forward(x);
-        self.down_proj.forward(gate * up)
+        let (gate, up) = match offload {
+            Some(off) => (
+                burn::tensor::activation::gelu(off.gate_proj.forward(x.clone(), &device)),
+                off.up_proj.forward(x, &device),
+            ),
+            None => (
+                burn::tensor::activation::gelu(self.gate_proj.forward(x.clone())),
+                self.up_proj.forward(x),
+            ),
+        };
+        match offload {
+            Some(off) => off.down_proj.forward(gate * up, &device),
+            None => self.down_proj.forward(gate * up),
+        }
     }
 }
 
@@ -663,9 +699,14 @@ pub enum Gemma4Ffn<B: Backend> {
 }
 
 impl<B: Backend> Gemma4Ffn<B> {
-    pub fn forward(&self, x: Tensor<B, 3>, router_raw: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
+    pub fn forward(
+        &self,
+        x: Tensor<B, 3>,
+        router_raw: Option<Tensor<B, 3>>,
+        ffn_offload: Option<&DenseFfnOffload>,
+    ) -> Tensor<B, 3> {
         match self {
-            Self::Dense(ffn) => ffn.forward(x),
+            Self::Dense(ffn) => ffn.forward(x, ffn_offload),
             Self::Moe(moe) => moe.forward(x, router_raw),
         }
     }
@@ -706,6 +747,7 @@ impl<B: Backend> Gemma4Layer<B> {
             softcap,
             None,
             0,
+            None,
         )
     }
 
@@ -730,6 +772,7 @@ impl<B: Backend> Gemma4Layer<B> {
             softcap,
             Some(cache),
             layer_idx,
+            None,
         )
     }
 
@@ -744,6 +787,7 @@ impl<B: Backend> Gemma4Layer<B> {
         softcap: f32,
         cache: Option<&mut dyn AttentionCache<B>>,
         layer_idx: usize,
+        layer_offload: Option<&LayerOffload>,
     ) -> Tensor<B, 3> {
         let mask = if self.use_sliding_window {
             sliding_mask
@@ -753,16 +797,32 @@ impl<B: Backend> Gemma4Layer<B> {
 
         // Select the RoPE matching this layer's head_dim
         let rope = &ropes[&self.attention.head_dim];
+        let attn_offload = layer_offload.map(|lo| &lo.attention);
+        let ffn_offload = layer_offload.and_then(|lo| lo.dense_ffn.as_ref());
 
         // Pre-norm attention
         let normed = self.input_norm.forward(x.clone());
         let attn_out = match cache {
-            Some(cache) => self
-                .attention
-                .forward_cached(normed, rope, start_pos, mask, softcap, cache, layer_idx),
-            None => self
-                .attention
-                .forward(normed, rope, start_pos, mask, softcap),
+            Some(cache) => self.attention.forward_inner(
+                normed,
+                rope,
+                start_pos,
+                mask,
+                softcap,
+                Some(cache),
+                layer_idx,
+                attn_offload,
+            ),
+            None => self.attention.forward_inner(
+                normed,
+                rope,
+                start_pos,
+                mask,
+                softcap,
+                None,
+                0,
+                attn_offload,
+            ),
         };
         // Post-attention norm + residual (scaled if layer_output_scale != 1.0)
         let attn_residual = self.post_attention_norm.forward(attn_out);
@@ -774,7 +834,7 @@ impl<B: Backend> Gemma4Layer<B> {
 
         // Pre-FFN norm — h (raw) is passed as router_raw so MoE can use its own normalization
         let normed = self.pre_ffn_norm.forward(h.clone());
-        let ffn_out = self.ffn.forward(normed, Some(h.clone()));
+        let ffn_out = self.ffn.forward(normed, Some(h.clone()), ffn_offload);
         // Post-FFN norm + residual (scaled if layer_output_scale != 1.0)
         let ffn_residual = self.post_ffn_norm.forward(ffn_out);
         if self.layer_output_scale == 1.0 {
@@ -800,6 +860,8 @@ pub struct Gemma4<B: Backend> {
 pub struct Gemma4Runtime<B: Backend> {
     pub ropes: HashMap<usize, RotaryEmbedding<B>>,
     pub config: Gemma4Config,
+    /// CPU-offloaded weights, indexed by layer. `None` when running normally (all weights in VRAM).
+    pub offloaded_layers: Option<Vec<LayerOffload>>,
 }
 
 /// Output from the Gemma 4 model
@@ -845,15 +907,17 @@ impl<B: Backend> Gemma4<B> {
                 };
 
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
-                    hidden_states = layer.forward_cached(
+                    let layer_offload = runtime.offloaded_layers.as_ref().map(|o| &o[layer_idx]);
+                    hidden_states = layer.forward_inner(
                         hidden_states,
                         &runtime.ropes,
                         start_pos,
                         sliding_mask.clone(),
                         global_mask.clone(),
                         runtime.config.attn_logit_softcap,
-                        cache,
+                        Some(cache),
                         layer_idx,
+                        layer_offload,
                     );
                 }
             }
@@ -871,14 +935,18 @@ impl<B: Backend> Gemma4<B> {
                     (None, None)
                 };
 
-                for layer in &self.layers {
-                    hidden_states = layer.forward(
+                for (layer_idx, layer) in self.layers.iter().enumerate() {
+                    let layer_offload = runtime.offloaded_layers.as_ref().map(|o| &o[layer_idx]);
+                    hidden_states = layer.forward_inner(
                         hidden_states,
                         &runtime.ropes,
                         0,
                         sliding_mask.clone(),
                         global_mask.clone(),
                         runtime.config.attn_logit_softcap,
+                        None,
+                        0,
+                        layer_offload,
                     );
                 }
             }
@@ -1079,7 +1147,7 @@ mod tests {
         };
 
         let x = Tensor::<TestBackend, 3>::zeros([1, 4, 64], &device);
-        let out = ffn.forward(x);
+        let out = ffn.forward(x, None);
 
         assert_eq!(out.dims(), [1, 4, 64]);
     }

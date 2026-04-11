@@ -15,7 +15,9 @@ use crate::gemma4::{
     ExpertWeights, Gemma4, Gemma4Attention, Gemma4Config, Gemma4DenseFfn, Gemma4ExpertFfn,
     Gemma4Ffn, Gemma4Layer, Gemma4MoE, Gemma4Runtime,
 };
-use crate::quantized::QuantizedFusedExperts;
+use crate::quantized::{
+    AttentionOffload, DenseFfnOffload, LayerOffload, QuantizedFusedExperts, QuantizedLinear,
+};
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 
@@ -207,6 +209,7 @@ pub fn load_gemma4_gguf<B: Backend, P: AsRef<Path>>(
     let runtime = Gemma4Runtime {
         ropes,
         config: config.clone(),
+        offloaded_layers: None,
     };
 
     Ok((model, runtime, config))
@@ -648,6 +651,256 @@ fn load_moe<B: Backend>(
         top_k: config.num_experts_per_tok,
         num_experts: config.num_experts,
     })
+}
+
+/// Load a tensor's raw quantized bytes from the GGUF mmap into a `QuantizedLinear`.
+///
+/// Dimensions are read from the tensor info: shape[0] = out_features, shape[1] = in_features
+/// (GGUF stores shapes in reversed order relative to Burn/PyTorch convention).
+fn load_quantized_linear(
+    file: &GgufFile,
+    name: &str,
+) -> Result<QuantizedLinear, Gemma4GgufLoadError> {
+    let info = file
+        .tensor_info(name)
+        .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(name.to_string()))?;
+    let out_features = info.shape[0];
+    let in_features = if info.shape.len() > 1 {
+        info.shape[1]
+    } else {
+        1
+    };
+    let ggml_type = info.ggml_type;
+
+    let (offset, len) = file.tensor_byte_range(name)?;
+    let mmap = file.mmap_arc();
+    let data = mmap[offset..offset + len].to_vec();
+
+    Ok(QuantizedLinear::new(
+        data,
+        ggml_type,
+        in_features,
+        out_features,
+    ))
+}
+
+/// Load CPU-offloaded attention weights for layer `idx`.
+///
+/// Reads raw quantized bytes from the GGUF mmap. The corresponding `Gemma4Attention`
+/// fields must be initialized with 1×1 dummy `Linear<B>` weights so VRAM use is minimal.
+fn load_attention_offload(
+    file: &GgufFile,
+    idx: usize,
+) -> Result<AttentionOffload, Gemma4GgufLoadError> {
+    let q_proj = load_quantized_linear(file, &format!("blk.{idx}.attn_q.weight"))?;
+    let k_proj = load_quantized_linear(file, &format!("blk.{idx}.attn_k.weight"))?;
+    let v_proj = if file.contains(&format!("blk.{idx}.attn_v.weight")) {
+        load_quantized_linear(file, &format!("blk.{idx}.attn_v.weight"))?
+    } else {
+        // Tied V→K: copy the quantized K data
+        load_quantized_linear(file, &format!("blk.{idx}.attn_k.weight"))?
+    };
+    let o_proj = load_quantized_linear(file, &format!("blk.{idx}.attn_output.weight"))?;
+    Ok(AttentionOffload {
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
+    })
+}
+
+/// Load CPU-offloaded dense FFN weights for layer `idx`.
+fn load_dense_ffn_offload(
+    file: &GgufFile,
+    idx: usize,
+) -> Result<DenseFfnOffload, Gemma4GgufLoadError> {
+    Ok(DenseFfnOffload {
+        gate_proj: load_quantized_linear(file, &format!("blk.{idx}.ffn_gate.weight"))?,
+        up_proj: load_quantized_linear(file, &format!("blk.{idx}.ffn_up.weight"))?,
+        down_proj: load_quantized_linear(file, &format!("blk.{idx}.ffn_down.weight"))?,
+    })
+}
+
+/// Load Gemma 4 from GGUF with attention and dense FFN weights CPU-offloaded.
+///
+/// Attention and dense FFN weights are kept in RAM as quantized bytes and
+/// dequantized per-token. VRAM holds only embeddings, norms, router weights,
+/// RoPE tables, and MoE shared expert weights. MoE routed expert weights are
+/// already zero-copy mmap'd via `QuantizedFusedExperts`.
+///
+/// Use this when VRAM is insufficient for full-precision weights.
+pub fn load_gemma4_gguf_offloaded<B: Backend, P: AsRef<Path>>(
+    path: P,
+    device: &B::Device,
+) -> Result<(Gemma4<B>, Gemma4Runtime<B>, Gemma4Config), Gemma4GgufLoadError> {
+    use burn::nn::LinearConfig;
+
+    let file = GgufFile::open(path)?;
+    let config = parse_gguf_config(&file)?;
+
+    let embed_tokens = load_embedding(&file, "token_embd.weight", &config, device)?;
+
+    // Dummy 1×1 linear for offloaded projections — never called during inference,
+    // needed only so Gemma4Attention keeps its non-optional Linear<B> fields.
+    let dummy_linear = |dev: &B::Device| LinearConfig::new(1, 1).with_bias(false).init::<B>(dev);
+
+    let mut layers = Vec::with_capacity(config.num_layers);
+    let mut offloaded_layers = Vec::with_capacity(config.num_layers);
+
+    for i in 0..config.num_layers {
+        // Load norms and non-attention/FFN weights normally (these are small)
+        let input_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.attn_norm.weight"),
+            config.hidden_size,
+            config.norm_eps,
+            device,
+        )?;
+        let post_attention_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.post_attention_norm.weight"),
+            config.hidden_size,
+            config.norm_eps,
+            device,
+        )?;
+        let pre_ffn_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.ffn_norm.weight"),
+            config.hidden_size,
+            config.norm_eps,
+            device,
+        )?;
+        let post_ffn_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.post_ffw_norm.weight"),
+            config.hidden_size,
+            config.norm_eps,
+            device,
+        )?;
+
+        // Infer head_dim and dims from tensor info (same logic as load_attention)
+        let q_name = format!("blk.{i}.attn_q.weight");
+        let k_name = format!("blk.{i}.attn_k.weight");
+        let q_info = file
+            .tensor_info(&q_name)
+            .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(q_name.clone()))?;
+        let k_info = file
+            .tensor_info(&k_name)
+            .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(k_name.clone()))?;
+        let q_dim = q_info.shape[0];
+        let kv_dim = k_info.shape[0];
+        let head_dim =
+            if let Some(norm_info) = file.tensor_info(&format!("blk.{i}.attn_q_norm.weight")) {
+                norm_info.shape[0]
+            } else {
+                config.head_dim
+            };
+        let num_heads = q_dim / head_dim;
+        let num_kv_heads = kv_dim / head_dim;
+
+        let q_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.attn_q_norm.weight"),
+            head_dim,
+            config.norm_eps,
+            device,
+        )?;
+        let k_norm = load_rmsnorm(
+            &file,
+            &format!("blk.{i}.attn_k_norm.weight"),
+            head_dim,
+            config.norm_eps,
+            device,
+        )?;
+
+        // Attention struct with 1×1 dummy projections (real weights go to RAM offload)
+        let attention = Gemma4Attention {
+            q_proj: dummy_linear(device),
+            k_proj: dummy_linear(device),
+            v_proj: dummy_linear(device),
+            o_proj: dummy_linear(device),
+            q_norm,
+            k_norm,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        };
+
+        // FFN: MoE layers are loaded normally (experts already zero-copy);
+        // dense FFN layers get dummy projections with real weights in RAM offload.
+        let (ffn, dense_ffn_offload) = if config.is_moe_layer(i) {
+            (Gemma4Ffn::Moe(load_moe(&file, i, &config, device)?), None)
+        } else {
+            let offload = load_dense_ffn_offload(&file, i)?;
+            let dense = Gemma4DenseFfn {
+                gate_proj: dummy_linear(device),
+                up_proj: dummy_linear(device),
+                down_proj: dummy_linear(device),
+            };
+            (Gemma4Ffn::Dense(dense), Some(offload))
+        };
+
+        let layer_output_scale = if file.contains(&format!("blk.{i}.layer_output_scale.weight")) {
+            let t: Tensor<B, 1> =
+                file.load_f32(&format!("blk.{i}.layer_output_scale.weight"), device)?;
+            t.into_scalar().elem::<f32>()
+        } else {
+            1.0
+        };
+
+        let use_sliding_window = head_dim < config.head_dim;
+
+        layers.push(Gemma4Layer {
+            attention,
+            ffn,
+            input_norm,
+            post_attention_norm,
+            pre_ffn_norm,
+            post_ffn_norm,
+            use_sliding_window,
+            layer_output_scale,
+        });
+
+        offloaded_layers.push(LayerOffload {
+            attention: load_attention_offload(&file, i)?,
+            dense_ffn: dense_ffn_offload,
+        });
+    }
+
+    let norm = load_rmsnorm(
+        &file,
+        "output_norm.weight",
+        config.hidden_size,
+        config.norm_eps,
+        device,
+    )?;
+
+    let mut ropes = std::collections::HashMap::new();
+    for layer in &layers {
+        let hd = layer.attention.head_dim;
+        ropes.entry(hd).or_insert_with(|| {
+            let base = if hd == config.head_dim {
+                config.rope_base
+            } else {
+                config.rope_base_swa
+            };
+            RotaryEmbedding::with_base(hd, config.max_seq_len, base, device)
+        });
+    }
+
+    let model = Gemma4 {
+        embed_tokens,
+        layers,
+        norm,
+    };
+
+    let runtime = Gemma4Runtime {
+        ropes,
+        config: config.clone(),
+        offloaded_layers: Some(offloaded_layers),
+    };
+
+    Ok((model, runtime, config))
 }
 
 #[cfg(test)]

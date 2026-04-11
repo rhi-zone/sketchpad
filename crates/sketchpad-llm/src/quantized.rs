@@ -350,6 +350,34 @@ impl QuantizedLinear {
     }
 }
 
+/// CPU-offloaded attention weights for a single transformer layer.
+///
+/// Used when VRAM is insufficient to hold attention weights. Weights stay
+/// in CPU RAM in quantized form and are dequantized on each forward call.
+pub struct AttentionOffload {
+    pub q_proj: QuantizedLinear,
+    pub k_proj: QuantizedLinear,
+    pub v_proj: QuantizedLinear,
+    pub o_proj: QuantizedLinear,
+}
+
+/// CPU-offloaded dense FFN weights for a single transformer layer.
+pub struct DenseFfnOffload {
+    pub gate_proj: QuantizedLinear,
+    pub up_proj: QuantizedLinear,
+    pub down_proj: QuantizedLinear,
+}
+
+/// CPU-offloaded weights for a single transformer layer.
+///
+/// MoE expert weights are excluded — they are already zero-copy mmap'd
+/// via `QuantizedFusedExperts`, so they don't need a separate offload path.
+pub struct LayerOffload {
+    pub attention: AttentionOffload,
+    /// Dense FFN offload. `None` for MoE layers (experts are already zero-copy).
+    pub dense_ffn: Option<DenseFfnOffload>,
+}
+
 /// Matrix multiply without allocating a `QuantizedTensor`.
 ///
 /// `data` is a row-major quantized weight matrix [out_features, in_features].
