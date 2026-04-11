@@ -504,12 +504,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Mistral(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
-            ModelInstance::Mixtral(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::Mixtral(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
             ModelInstance::Gemma(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
