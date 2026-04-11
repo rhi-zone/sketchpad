@@ -122,6 +122,9 @@ pub use qwen_loader::{QwenLoadError, load_qwen};
 pub use rwkv::{Rwkv, RwkvConfig, RwkvOutput, RwkvRuntime, RwkvState};
 pub use rwkv_loader::{RwkvLoadError, load_rwkv};
 
+// Re-export quantized types
+pub use quantized::{QuantizedFusedExperts, QuantizedLinear, QuantizedTensor};
+
 // Re-export sampling
 pub use sampling::{SamplerConfig, sample_from_logits, sample_token};
 

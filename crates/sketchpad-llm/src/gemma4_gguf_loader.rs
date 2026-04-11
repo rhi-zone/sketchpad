@@ -482,15 +482,28 @@ fn load_moe<B: Backend>(
     let down_name = format!("blk.{idx}.ffn_down_exps.weight");
 
     let experts = if file.contains(&gate_up_name) {
-        // Keep expert weights quantized — copy raw bytes, don't dequantize
-        let (gate_up_raw, gate_up_info) = file.tensor_raw_data(&gate_up_name)?;
-        let (down_raw, down_info) = file.tensor_raw_data(&down_name)?;
+        // Keep expert weights quantized — share mmap via Arc, don't copy bytes
+        let gate_up_info = file
+            .tensor_info(&gate_up_name)
+            .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(gate_up_name.clone()))?;
+        let gate_up_type = gate_up_info.ggml_type;
+        let down_info = file
+            .tensor_info(&down_name)
+            .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(down_name.clone()))?;
+        let down_type = down_info.ggml_type;
+
+        let (gate_up_offset, gate_up_len) = file.tensor_byte_range(&gate_up_name)?;
+        let (down_offset, down_len) = file.tensor_byte_range(&down_name)?;
 
         ExpertWeights::Quantized(QuantizedFusedExperts::new(
-            gate_up_raw.to_vec(),
-            gate_up_info.ggml_type,
-            down_raw.to_vec(),
-            down_info.ggml_type,
+            file.mmap_arc(),
+            gate_up_offset,
+            gate_up_len,
+            gate_up_type,
+            file.mmap_arc(),
+            down_offset,
+            down_len,
+            down_type,
             config.hidden_size,
             expert_inter,
             config.num_experts,

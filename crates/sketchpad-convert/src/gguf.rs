@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use burn::prelude::*;
 use half::f16;
@@ -142,7 +143,7 @@ pub struct GgufTensorInfo {
 
 /// A loaded GGUF file with memory-mapped data
 pub struct GgufFile {
-    _mmap: memmap2::Mmap,
+    mmap: Arc<memmap2::Mmap>,
     metadata: HashMap<String, MetadataValue>,
     tensors: HashMap<String, GgufTensorInfo>,
     /// Pointer to the start of the mmap
@@ -297,7 +298,7 @@ impl GgufFile {
     /// Open and parse a GGUF file
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, GgufError> {
         let file = File::open(path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        let mmap = Arc::new(unsafe { MmapOptions::new().map(&file)? });
 
         let data_ptr = mmap.as_ptr();
         let data_len = mmap.len();
@@ -358,7 +359,7 @@ impl GgufFile {
         let tensor_data_offset = align_offset(reader.pos, ALIGNMENT);
 
         Ok(Self {
-            _mmap: mmap,
+            mmap,
             metadata,
             tensors,
             data_ptr,
@@ -408,6 +409,24 @@ impl GgufFile {
         let data = unsafe { std::slice::from_raw_parts(self.data_ptr.add(abs_offset), data_size) };
 
         Ok((data, info))
+    }
+
+    /// Return an Arc clone of the memory-mapped file, for zero-copy sharing.
+    pub fn mmap_arc(&self) -> Arc<memmap2::Mmap> {
+        Arc::clone(&self.mmap)
+    }
+
+    /// Return the byte range (absolute offset, length) for a tensor without borrowing.
+    pub fn tensor_byte_range(&self, name: &str) -> Result<(usize, usize), GgufError> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| GgufError::TensorNotFound(name.to_string()))?;
+        let n_elements: usize = info.shape.iter().product();
+        let n_blocks = n_elements / info.ggml_type.block_size();
+        let data_size = n_blocks * info.ggml_type.type_size();
+        let abs_offset = self.tensor_data_offset + info.offset as usize;
+        Ok((abs_offset, data_size))
     }
 
     /// Load a tensor and dequantize to f32

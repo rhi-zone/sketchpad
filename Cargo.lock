@@ -5767,6 +5767,7 @@ dependencies = [
  "axum 0.7.9",
  "burn",
  "burn-ndarray",
+ "memmap2",
  "minijinja",
  "serde",
  "serde_json",

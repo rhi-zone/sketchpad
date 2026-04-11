@@ -5,6 +5,8 @@
 //! usage proportional to the quantized size (~15GB for 26B params in Q4_K)
 //! instead of the full f32 size (~104GB).
 
+use std::sync::Arc;
+
 use burn::prelude::*;
 use sketchpad_convert::gguf::{GgmlType, dequantize};
 
@@ -124,15 +126,15 @@ impl QuantizedTensor {
 /// - `down_exps`: [expert_inter, hidden_size, num_experts] — down projection
 ///
 /// In GGML row-major layout, the expert dimension is outermost, so each expert's
-/// data is contiguous in memory. This struct keeps the raw quantized bytes and
-/// extracts per-expert data on the fly during forward.
+/// data is contiguous in memory. This struct references the mmap directly via Arc,
+/// avoiding a copy of the expert weight bytes.
 #[derive(Debug)]
 pub struct QuantizedFusedExperts {
-    /// Raw gate_up_exps quantized bytes
-    gate_up_data: Vec<u8>,
+    gate_up_mmap: Arc<memmap2::Mmap>,
+    gate_up_offset: usize,
     gate_up_type: GgmlType,
-    /// Raw down_exps quantized bytes
-    down_data: Vec<u8>,
+    down_mmap: Arc<memmap2::Mmap>,
+    down_offset: usize,
     down_type: GgmlType,
     /// Model dimensions
     hidden_size: usize,
@@ -144,10 +146,15 @@ pub struct QuantizedFusedExperts {
 }
 
 impl QuantizedFusedExperts {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        gate_up_data: Vec<u8>,
+        gate_up_mmap: Arc<memmap2::Mmap>,
+        gate_up_offset: usize,
+        gate_up_len: usize,
         gate_up_type: GgmlType,
-        down_data: Vec<u8>,
+        down_mmap: Arc<memmap2::Mmap>,
+        down_offset: usize,
+        down_len: usize,
         down_type: GgmlType,
         hidden_size: usize,
         expert_inter: usize,
@@ -163,20 +170,22 @@ impl QuantizedFusedExperts {
         let down_bytes_per_expert = down_rows_per_expert * down_row_bytes;
 
         assert_eq!(
-            gate_up_data.len(),
+            gate_up_len,
             gate_up_bytes_per_expert * num_experts,
-            "gate_up_data size mismatch"
+            "gate_up data size mismatch"
         );
         assert_eq!(
-            down_data.len(),
+            down_len,
             down_bytes_per_expert * num_experts,
-            "down_data size mismatch"
+            "down data size mismatch"
         );
 
         Self {
-            gate_up_data,
+            gate_up_mmap,
+            gate_up_offset,
             gate_up_type,
-            down_data,
+            down_mmap,
+            down_offset,
             down_type,
             hidden_size,
             expert_inter,
@@ -210,7 +219,8 @@ impl QuantizedFusedExperts {
         // Extract this expert's gate_up data
         let gu_start = expert_idx * self.gate_up_bytes_per_expert;
         let gu_end = gu_start + self.gate_up_bytes_per_expert;
-        let gu_data = &self.gate_up_data[gu_start..gu_end];
+        let gu_data =
+            &self.gate_up_mmap[self.gate_up_offset + gu_start..self.gate_up_offset + gu_end];
 
         // gate_up weight is [expert_inter*2, hidden_size] for this expert
         // After matmul: [n_tokens, expert_inter*2]
@@ -237,7 +247,7 @@ impl QuantizedFusedExperts {
         // Down projection
         let dn_start = expert_idx * self.down_bytes_per_expert;
         let dn_end = dn_start + self.down_bytes_per_expert;
-        let dn_data = &self.down_data[dn_start..dn_end];
+        let dn_data = &self.down_mmap[self.down_offset + dn_start..self.down_offset + dn_end];
 
         let output = quantized_matmul_f32(
             dn_data,
@@ -250,6 +260,93 @@ impl QuantizedFusedExperts {
 
         let tensor_data = TensorData::new(output, [n_tokens, 1, self.hidden_size]);
         Tensor::from_data(tensor_data, &device)
+    }
+}
+
+/// A single linear layer with weights stored as quantized bytes in CPU RAM.
+///
+/// On each `forward` call, dequantizes the weights and uploads them to the
+/// compute device. This keeps VRAM usage near zero for this layer at the
+/// cost of per-token CPU dequantization and PCIe upload overhead.
+///
+/// Use when VRAM is the hard constraint and inference speed is secondary.
+/// For best performance, use `burn::nn::Linear` with weights in VRAM instead.
+pub struct QuantizedLinear {
+    /// Raw quantized weight bytes, shape [out_features, in_features] in GGUF row-major layout
+    data: Vec<u8>,
+    ggml_type: GgmlType,
+    in_features: usize,
+    out_features: usize,
+}
+
+impl QuantizedLinear {
+    /// Create from raw quantized bytes.
+    ///
+    /// `data` must contain `out_features` rows, each of
+    /// `(in_features / block_size) * type_size` bytes.
+    pub fn new(
+        data: Vec<u8>,
+        ggml_type: GgmlType,
+        in_features: usize,
+        out_features: usize,
+    ) -> Self {
+        let row_bytes = (in_features / ggml_type.block_size()) * ggml_type.type_size();
+        assert_eq!(
+            data.len(),
+            out_features * row_bytes,
+            "QuantizedLinear data length mismatch: got {}, expected {} rows × {} bytes",
+            data.len(),
+            out_features,
+            row_bytes,
+        );
+        Self {
+            data,
+            ggml_type,
+            in_features,
+            out_features,
+        }
+    }
+
+    pub fn in_features(&self) -> usize {
+        self.in_features
+    }
+    pub fn out_features(&self) -> usize {
+        self.out_features
+    }
+
+    /// Forward: [batch, seq, in] → [batch, seq, out]
+    ///
+    /// Dequantizes weights on CPU, uploads to `device`, and runs matmul.
+    pub fn forward<B: Backend>(&self, input: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 3> {
+        let [batch, seq, _] = input.dims();
+        let input_data: Vec<f32> = input.to_data().to_vec().unwrap();
+        let n_tokens = batch * seq;
+        let output_data = quantized_matmul_f32(
+            &self.data,
+            self.ggml_type,
+            self.out_features,
+            self.in_features,
+            &input_data,
+            n_tokens,
+        );
+        let tensor_data = TensorData::new(output_data, [batch, seq, self.out_features]);
+        Tensor::from_data(tensor_data, device)
+    }
+
+    /// Forward for 2D input: [n_tokens, in] → [n_tokens, out]
+    pub fn forward_2d<B: Backend>(&self, input: Tensor<B, 2>, device: &B::Device) -> Tensor<B, 2> {
+        let [n_tokens, _] = input.dims();
+        let input_data: Vec<f32> = input.to_data().to_vec().unwrap();
+        let output_data = quantized_matmul_f32(
+            &self.data,
+            self.ggml_type,
+            self.out_features,
+            self.in_features,
+            &input_data,
+            n_tokens,
+        );
+        let tensor_data = TensorData::new(output_data, [n_tokens, self.out_features]);
+        Tensor::from_data(tensor_data, device)
     }
 }
 

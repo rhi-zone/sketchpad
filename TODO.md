@@ -338,9 +338,37 @@ See `docs/cubecl-guide.md` for implementation details.
 - [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
 
 #### Memory / Offloading (GGUF inference)
-- [ ] **Zero-copy expert bytes**: `QuantizedFusedExperts` currently copies expert bytes out of the mmap into `Vec<u8>`. Add a lifetime parameter `QuantizedFusedExperts<'a>` with `gate_up_data: &'a [u8]` so expert data stays in the OS page cache (disk offloading for free, evictable under memory pressure). The loader keeps `GgufFile` alive alongside the model.
-- [ ] **CPU offloading flag** (`--offload-weights`): a `QuantizedLinear` struct analogous to `QuantizedFusedExperts` that keeps attention/FFN weight bytes in RAM and uploads to GPU per token. Usable when VRAM is the hard constraint and speed is acceptable. Needs CLI flag; expert weights are already offloaded.
-- [ ] **GPU-side quantized matmul** for attention weights: keep Q4K/Q8 bytes in VRAM, dequantize inside a compute kernel (what llama.cpp does). 4-8x VRAM savings for non-expert weights vs f16. Implement in `sketchpad-cubecl` using CubeCL — compiles to HIP for ROCm (7900 XTX native), CUDA for NVIDIA, WGPU/Vulkan as fallback. Same kernel, all backends. Enable `hip` feature in cubecl dep.
+
+Three strategies compose into a tier system. Strategies 1 and 3 pair well (experts on disk,
+attention in VRAM quantized). Strategies 2 and 3 are mutually exclusive for the same weights
+(CPU vs VRAM for attention). Strategy 1 can generalize to ALL weights, not just experts.
+
+**`WeightStorage<B>` enum** (unifying abstraction, implement before 2 and 3):
+```rust
+enum WeightStorage<B: Backend> {
+    GpuDequantized(Linear<B>),      // current default: f16/f32 in VRAM
+    CpuQuantized(QuantizedLinear),  // strategy 2: bytes in RAM, upload per token
+    MmapQuantized(Arc<Mmap>, usize, usize, GgmlType),  // strategy 1: OS page cache
+    // GpuQuantized: strategy 3, after CubeCL kernel exists
+}
+```
+**Integration**: avoid restructuring `Module` types. Store offloaded weights in a runtime
+side-table `HashMap<(layer_idx, weight_name), WeightStorage<B>>`. Forward pass checks the
+table and uses `QuantizedLinear::forward` or normal `Linear::forward`. Hash lookup overhead
+is acceptable for CPU-offloaded inference where memory is the constraint anyway.
+
+- [ ] **Zero-copy expert bytes** (strategy 1, experts only): change `GgufFile._mmap` to
+  `Arc<Mmap>`, expose `mmap_arc() -> Arc<Mmap>` + `tensor_data_range()` returning offset/len.
+  `QuantizedFusedExperts` stores `Arc<Mmap>` + offset + len instead of `Vec<u8>`. Expert bytes
+  stay in OS page cache, evictable under pressure. Immediate ~17GB RAM savings for 26B model.
+- [ ] **`QuantizedLinear` struct**: analogous to `QuantizedFusedExperts` but for a single linear
+  layer. Holds `Vec<u8>` (or `Arc<Mmap>` slice) + shape + GgmlType. `forward<B>` dequantizes
+  and uploads to GPU each call. Foundation for strategy 2 and the side-table approach.
+- [ ] **CPU offloading** (`--offload-weights`): populate runtime side-table with `QuantizedLinear`
+  for all attention/FFN weights. Pass side-table through forward. CLI flag for `llm gguf`.
+- [ ] **GPU-side quantized matmul** (strategy 3): keep Q4K/Q8 bytes in VRAM, dequantize in
+  a CubeCL kernel. Implement in `sketchpad-cubecl` — HIP for ROCm (7900 XTX native), CUDA
+  for NVIDIA, WGPU/Vulkan fallback. 4-8x VRAM savings vs f16. Enable `hip` cubecl feature.
 
 ### Shared Building Blocks (burn-models-core)
 

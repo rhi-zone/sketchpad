@@ -14,6 +14,7 @@ serve = ["axum", "tokio"]
 sketchpad-core = { path = "../sketchpad-core" }
 sketchpad-convert = { path = "../sketchpad-convert" }
 burn = { workspace = true }
+memmap2 = "0.9"
 thiserror = { workspace = true }
 tokenizers = "0.21"
 ahash = "0.8"
