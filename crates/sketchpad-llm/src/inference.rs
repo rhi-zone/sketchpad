@@ -514,12 +514,9 @@ impl<B: Backend> LlmInstance<B> {
                 config.max_tokens,
                 config.sampler.temperature,
             ),
-            ModelInstance::Gemma(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::Gemma(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
             ModelInstance::Phi(model, runtime) => model.generate(
                 input_ids,
                 runtime,

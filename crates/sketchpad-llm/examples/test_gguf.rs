@@ -88,7 +88,15 @@ fn main() {
             }
 
             let gen_start = std::time::Instant::now();
-            let output_ids = model.generate(input_ids, &runtime, max_tokens, 0.7);
+            let output_ids = model.generate(
+                input_ids,
+                &runtime,
+                max_tokens,
+                &sketchpad_llm::sampling::SamplerConfig {
+                    temperature: 0.7,
+                    ..sketchpad_llm::sampling::SamplerConfig::greedy()
+                },
+            );
             let elapsed = gen_start.elapsed().as_secs_f64();
 
             let all_ids: Vec<i32> = output_ids.to_data().to_vec().unwrap();

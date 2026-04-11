@@ -400,7 +400,15 @@ pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result
             eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
 
             let t = std::time::Instant::now();
-            let out = model.generate(input_ids, &runtime, max_tokens, temperature);
+            let out = model.generate(
+                input_ids,
+                &runtime,
+                max_tokens,
+                &SamplerConfig {
+                    temperature,
+                    ..SamplerConfig::greedy()
+                },
+            );
             let elapsed = t.elapsed().as_secs_f64();
             let all: Vec<i32> = out.to_data().to_vec().unwrap();
             let n = all.len() - input.seq_len;
