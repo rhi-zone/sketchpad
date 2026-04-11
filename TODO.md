@@ -333,10 +333,14 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] KV cache for Gemma 4 (prefill+decode with ModelKvCache)
 - [ ] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
 - [ ] Wire sampler into remaining models (currently Mistral/Mixtral/etc use temperature-only)
-- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — BLOCKED: f32 dequant of 26B MoE needs ~104GB RAM (have 60GB). Need quantized inference or streaming dequant
+- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — currently blocked: non-expert weights dequantized to f16 in VRAM (~15-20GB for 26B); expert weights in RAM as raw Q4K bytes
 - [ ] Anthropic-compatible HTTP API adapter
 - [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
-- [ ] Streaming GGUF dequantization (avoid 50GB RAM for full f32 expansion)
+
+#### Memory / Offloading (GGUF inference)
+- [ ] **Zero-copy expert bytes**: `QuantizedFusedExperts` currently copies expert bytes out of the mmap into `Vec<u8>`. Add a lifetime parameter `QuantizedFusedExperts<'a>` with `gate_up_data: &'a [u8]` so expert data stays in the OS page cache (disk offloading for free, evictable under memory pressure). The loader keeps `GgufFile` alive alongside the model.
+- [ ] **CPU offloading flag** (`--offload-weights`): a `QuantizedLinear` struct analogous to `QuantizedFusedExperts` that keeps attention/FFN weight bytes in RAM and uploads to GPU per token. Usable when VRAM is the hard constraint and speed is acceptable. Needs CLI flag; expert weights are already offloaded.
+- [ ] **GPU-side quantized matmul** for attention weights: keep Q4K/Q8 bytes in VRAM, dequantize inside a WGSL compute shader (what llama.cpp does). 4-8x VRAM savings for non-expert weights vs f16. Requires custom CubeCL/WGSL kernel — significant effort but the right long-term path for fitting 27B+ on consumer VRAM.
 
 ### Shared Building Blocks (burn-models-core)
 
