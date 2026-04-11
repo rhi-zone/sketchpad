@@ -18,6 +18,8 @@
 //!
 //! - Gemma 4 26B-A4B (128 experts, 8 active, 1 shared)
 
+use std::collections::HashMap;
+
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 
@@ -154,13 +156,13 @@ impl Gemma4Config {
             norm: RmsNorm::with_eps(self.hidden_size, self.norm_eps, device),
         };
 
+        let mut ropes = HashMap::new();
+        ropes.insert(
+            self.head_dim,
+            RotaryEmbedding::with_base(self.head_dim, self.max_seq_len, self.rope_base, device),
+        );
         let runtime = Gemma4Runtime {
-            rope: RotaryEmbedding::with_base(
-                self.head_dim,
-                self.max_seq_len,
-                self.rope_base,
-                device,
-            ),
+            ropes,
             config: self.clone(),
         };
 
@@ -611,7 +613,7 @@ impl<B: Backend> Gemma4Layer<B> {
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
-        rope: &RotaryEmbedding<B>,
+        ropes: &HashMap<usize, RotaryEmbedding<B>>,
         start_pos: usize,
         sliding_mask: Option<Tensor<B, 2>>,
         global_mask: Option<Tensor<B, 2>>,
@@ -619,7 +621,7 @@ impl<B: Backend> Gemma4Layer<B> {
     ) -> Tensor<B, 3> {
         self.forward_inner(
             x,
-            rope,
+            ropes,
             start_pos,
             sliding_mask,
             global_mask,
@@ -633,7 +635,7 @@ impl<B: Backend> Gemma4Layer<B> {
     pub fn forward_cached(
         &self,
         x: Tensor<B, 3>,
-        rope: &RotaryEmbedding<B>,
+        ropes: &HashMap<usize, RotaryEmbedding<B>>,
         start_pos: usize,
         sliding_mask: Option<Tensor<B, 2>>,
         global_mask: Option<Tensor<B, 2>>,
@@ -643,7 +645,7 @@ impl<B: Backend> Gemma4Layer<B> {
     ) -> Tensor<B, 3> {
         self.forward_inner(
             x,
-            rope,
+            ropes,
             start_pos,
             sliding_mask,
             global_mask,
@@ -657,7 +659,7 @@ impl<B: Backend> Gemma4Layer<B> {
     fn forward_inner(
         &self,
         x: Tensor<B, 3>,
-        rope: &RotaryEmbedding<B>,
+        ropes: &HashMap<usize, RotaryEmbedding<B>>,
         start_pos: usize,
         sliding_mask: Option<Tensor<B, 2>>,
         global_mask: Option<Tensor<B, 2>>,
@@ -670,6 +672,9 @@ impl<B: Backend> Gemma4Layer<B> {
         } else {
             global_mask
         };
+
+        // Select the RoPE matching this layer's head_dim
+        let rope = &ropes[&self.attention.head_dim];
 
         // Pre-norm attention
         let normed = self.input_norm.forward(x.clone());
@@ -701,8 +706,11 @@ pub struct Gemma4<B: Backend> {
 }
 
 /// Runtime state for Gemma 4
+///
+/// Stores per-head-dim RoPE embeddings since Gemma 4 uses different head_dims
+/// across layers (e.g. 256 for normal attention, 512 for global attention).
 pub struct Gemma4Runtime<B: Backend> {
-    pub rope: RotaryEmbedding<B>,
+    pub ropes: HashMap<usize, RotaryEmbedding<B>>,
     pub config: Gemma4Config,
 }
 
@@ -751,7 +759,7 @@ impl<B: Backend> Gemma4<B> {
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
                     hidden_states = layer.forward_cached(
                         hidden_states,
-                        &runtime.rope,
+                        &runtime.ropes,
                         start_pos,
                         sliding_mask.clone(),
                         global_mask.clone(),
@@ -778,7 +786,7 @@ impl<B: Backend> Gemma4<B> {
                 for layer in &self.layers {
                     hidden_states = layer.forward(
                         hidden_states,
-                        &runtime.rope,
+                        &runtime.ropes,
                         0,
                         sliding_mask.clone(),
                         global_mask.clone(),

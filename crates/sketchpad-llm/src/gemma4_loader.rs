@@ -68,13 +68,18 @@ pub fn load_gemma4<B: Backend, P: AsRef<Path>>(
         norm,
     };
 
-    let runtime = Gemma4Runtime {
-        rope: RotaryEmbedding::with_base(
+    let mut ropes = std::collections::HashMap::new();
+    ropes.insert(
+        config.head_dim,
+        RotaryEmbedding::with_base(
             config.head_dim,
             config.max_seq_len,
             config.rope_base,
             device,
         ),
+    );
+    let runtime = Gemma4Runtime {
+        ropes,
         config: config.clone(),
     };
 

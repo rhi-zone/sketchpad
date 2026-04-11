@@ -176,6 +176,15 @@ pub fn load_gemma4_gguf<B: Backend, P: AsRef<Path>>(
         device,
     )?;
 
+    // Collect all unique head_dims from loaded layers and create per-dim RoPE
+    let mut ropes = std::collections::HashMap::new();
+    for layer in &layers {
+        let hd = layer.attention.head_dim;
+        ropes.entry(hd).or_insert_with(|| {
+            RotaryEmbedding::with_base(hd, config.max_seq_len, config.rope_base, device)
+        });
+    }
+
     let model = Gemma4 {
         embed_tokens,
         layers,
@@ -183,12 +192,7 @@ pub fn load_gemma4_gguf<B: Backend, P: AsRef<Path>>(
     };
 
     let runtime = Gemma4Runtime {
-        rope: RotaryEmbedding::with_base(
-            config.head_dim,
-            config.max_seq_len,
-            config.rope_base,
-            device,
-        ),
+        ropes,
         config: config.clone(),
     };
 
@@ -218,6 +222,9 @@ fn load_linear<B: Backend>(
         return Err(Gemma4GgufLoadError::MissingTensor(name.to_string()));
     }
     let weight: Tensor<B, 2> = file.load_f32(name, device)?;
+    // GGUF shape (after reversal) is [out_features, in_features] but
+    // Burn's Linear stores weight as [d_input, d_output], so transpose
+    let weight = weight.transpose();
     let mut linear = LinearConfig::new(in_features, out_features)
         .with_bias(false)
         .init(device);
@@ -324,8 +331,9 @@ fn load_attention<B: Backend>(
         .tensor_info(&k_name)
         .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(k_name.clone()))?;
 
-    let q_dim = q_info.shape[1];
-    let kv_dim = k_info.shape[1];
+    // After GGUF shape reversal, shapes are [out_features, in_features] in Burn order
+    let q_dim = q_info.shape[0];
+    let kv_dim = k_info.shape[0];
 
     // Determine head_dim from Q norm if available, else from config
     let head_dim =
@@ -343,6 +351,8 @@ fn load_attention<B: Backend>(
     // Some layers (global attention) tie V to K — no attn_v.weight exists
     // Load K weight once and share if needed
     let k_weight: Tensor<B, 2> = file.load_f32(&k_name, device)?;
+    // Transpose: GGUF [out, in] → Linear [in, out]
+    let k_weight = k_weight.transpose();
 
     let mut k_proj = LinearConfig::new(config.hidden_size, kv_dim)
         .with_bias(false)

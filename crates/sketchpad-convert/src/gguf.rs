@@ -339,6 +339,11 @@ impl GgufFile {
             let ggml_type = GgmlType::from_u32(type_id)?;
             let offset = reader.read_u64()?;
 
+            // GGUF stores dimensions from fastest-varying (innermost) to slowest.
+            // Burn and most frameworks use the opposite convention: [slowest, ..., fastest].
+            // Reverse the shape so callers get standard row-major dimension ordering.
+            shape.reverse();
+
             tensors.insert(
                 name,
                 GgufTensorInfo {
