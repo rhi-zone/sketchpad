@@ -327,7 +327,7 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] KV cache for Gemma 4 (prefill+decode with ModelKvCache)
 - [x] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
 - [x] Wire sampler into remaining models (SamplerConfig in all models: LLaMA, Gemma 2/4, Mistral, Mixtral, Phi, Qwen, DeepSeek, RWKV, Mamba, Jamba)
-- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — currently blocked: non-expert weights dequantized to f16 in VRAM (~15-20GB for 26B); expert weights in RAM as raw Q4K bytes
+- [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — use `load_gemma4_gguf_gpu_quant`; attention/FFN weights stay as Q4K bytes in VRAM (~1–2 GB), MoE experts zero-copy mmap'd. Should fit a 16 GB GPU. Unrun, not blocked.
 - [ ] Anthropic-compatible HTTP API adapter
 - [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
 
