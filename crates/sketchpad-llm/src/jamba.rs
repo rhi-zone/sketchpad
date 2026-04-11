@@ -327,6 +327,9 @@ pub struct JambaBlock<B: Backend> {
     pub core: JambaCore<B>,
     /// FFN (dense or MoE)
     pub ffn: JambaFFN<B>,
+    /// Layer index within the model (used to identify attention layers for KV cache)
+    #[module(skip)]
+    pub index: usize,
 }
 
 /// Core layer type
@@ -368,6 +371,7 @@ impl<B: Backend> JambaBlock<B> {
                 .init(device),
             core,
             ffn,
+            index: layer_idx,
         }
     }
 
@@ -387,8 +391,11 @@ impl<B: Backend> JambaBlock<B> {
                 mamba.forward(x, ssm_state, conv_state)
             }
             JambaCore::Attention(attn) => {
-                // For simplicity, not using KV cache in this implementation
-                attn.forward(x)
+                if let Some(s) = state {
+                    attn.forward_cached(x, &mut s.k_cache, &mut s.v_cache)
+                } else {
+                    attn.forward(x)
+                }
             }
         };
 
@@ -696,6 +703,125 @@ impl<B: Backend> JambaAttention<B> {
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.n_heads * self.head_dim]);
         self.o_proj.forward(out)
+    }
+
+    /// Forward pass with KV cache support for autoregressive generation.
+    ///
+    /// Projects Q/K/V from `x`, appends new K/V to the running cache, then
+    /// computes attention over the full accumulated sequence.
+    ///
+    /// # Arguments
+    ///
+    /// * `x` - Input tensor [batch, new_seq_len, d_model]
+    /// * `k_cache` - Accumulated key cache [batch, n_kv_heads, cached_len, head_dim], updated in place
+    /// * `v_cache` - Accumulated value cache [batch, n_kv_heads, cached_len, head_dim], updated in place
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        k_cache: &mut Option<Tensor<B, 4>>,
+        v_cache: &mut Option<Tensor<B, 4>>,
+    ) -> Tensor<B, 3> {
+        let [batch, new_seq_len, _] = x.dims();
+
+        // Project Q (new tokens only)
+        let q = self
+            .q_proj
+            .forward(x.clone())
+            .reshape([batch, new_seq_len, self.n_heads, self.head_dim])
+            .swap_dims(1, 2);
+
+        // Project K/V for new tokens (pre-GQA, n_kv_heads shape)
+        let k_new = self
+            .k_proj
+            .forward(x.clone())
+            .reshape([batch, new_seq_len, self.n_kv_heads, self.head_dim])
+            .swap_dims(1, 2);
+        let v_new = self
+            .v_proj
+            .forward(x)
+            .reshape([batch, new_seq_len, self.n_kv_heads, self.head_dim])
+            .swap_dims(1, 2);
+
+        // Append new K/V to cache
+        let k_full = match k_cache.take() {
+            Some(cached) => Tensor::cat(vec![cached, k_new], 2),
+            None => k_new,
+        };
+        let v_full = match v_cache.take() {
+            Some(cached) => Tensor::cat(vec![cached, v_new], 2),
+            None => v_new,
+        };
+        *k_cache = Some(k_full.clone());
+        *v_cache = Some(v_full.clone());
+
+        let total_seq_len = k_full.dims()[2];
+
+        // Expand accumulated K/V for GQA
+        let n_rep = self.n_heads / self.n_kv_heads;
+        let k = if n_rep > 1 {
+            k_full
+                .unsqueeze_dim::<5>(2)
+                .expand([batch, self.n_kv_heads, n_rep, total_seq_len, self.head_dim])
+                .reshape([batch, self.n_heads, total_seq_len, self.head_dim])
+        } else {
+            k_full
+        };
+        let v = if n_rep > 1 {
+            v_full
+                .unsqueeze_dim::<5>(2)
+                .expand([batch, self.n_kv_heads, n_rep, total_seq_len, self.head_dim])
+                .reshape([batch, self.n_heads, total_seq_len, self.head_dim])
+        } else {
+            v_full
+        };
+
+        // Scaled dot-product attention
+        // q: [batch, n_heads, new_seq_len, head_dim]
+        // k: [batch, n_heads, total_seq_len, head_dim]
+        let scale = (self.head_dim as f32).sqrt();
+        let attn = q.matmul(k.swap_dims(2, 3)) / scale;
+
+        // Causal mask: new tokens (rows) attend to all prior + current tokens (cols)
+        let mask = Self::prefill_causal_mask::<B>(new_seq_len, total_seq_len, &attn.device());
+        let attn = attn + mask;
+
+        let attn = activation::softmax(attn, 3);
+        let out = attn.matmul(v);
+
+        // Reshape back: [batch, new_seq_len, n_heads * head_dim]
+        let out = out
+            .swap_dims(1, 2)
+            .reshape([batch, new_seq_len, self.n_heads * self.head_dim]);
+        self.o_proj.forward(out)
+    }
+
+    /// Causal mask for prefill/cached forward: shape [1, 1, new_seq_len, total_seq_len].
+    ///
+    /// Row `i` (0-indexed within the new tokens) can attend to columns
+    /// `0..cached_len + i + 1`, where `cached_len = total_seq_len - new_seq_len`.
+    fn prefill_causal_mask<B2: Backend>(
+        new_seq_len: usize,
+        total_seq_len: usize,
+        device: &B2::Device,
+    ) -> Tensor<B2, 4> {
+        let cached_len = total_seq_len - new_seq_len;
+        let mask_data: Vec<f32> = (0..new_seq_len)
+            .flat_map(|i| {
+                (0..total_seq_len).map(move |j| {
+                    if j <= cached_len + i {
+                        0.0
+                    } else {
+                        f32::NEG_INFINITY
+                    }
+                })
+            })
+            .collect();
+        Tensor::<B2, 1>::from_floats(&mask_data[..], device).reshape([
+            1,
+            1,
+            new_seq_len,
+            total_seq_len,
+        ])
     }
 
     fn causal_mask<B2: Backend>(seq_len: usize, device: &B2::Device) -> Tensor<B2, 4> {

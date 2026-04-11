@@ -214,7 +214,12 @@ fn load_jamba_block<B: Backend>(
         JambaFFN::Dense(load_jamba_dense_ffn(file, &prefix, config, device)?)
     };
 
-    Ok(JambaBlock { ln, core, ffn })
+    Ok(JambaBlock {
+        ln,
+        core,
+        ffn,
+        index: layer_idx,
+    })
 }
 
 fn load_jamba_attention<B: Backend>(
