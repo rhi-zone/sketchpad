@@ -144,7 +144,7 @@ pub enum LlmCommands {
         /// Float precision for model weights and activations
         /// f16 halves VRAM vs f32; bf16 has the same range as f32 but less precision.
         /// On CPU (ndarray), f32 is always used regardless.
-        #[arg(long, value_enum, default_value = "f16")]
+        #[arg(long, value_enum, default_value = "bf16")]
         precision: crate::Precision,
 
         /// Available VRAM in gigabytes. Used to select the best loading strategy.

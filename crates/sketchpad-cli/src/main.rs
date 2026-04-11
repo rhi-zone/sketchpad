@@ -158,7 +158,7 @@ enum Commands {
         lora_scales: Vec<f64>,
 
         /// Float precision (f32 = more VRAM, f16 = less VRAM, faster after warmup)
-        #[arg(long, value_enum, default_value = "f16")]
+        #[arg(long, value_enum, default_value = "bf16")]
         precision: Precision,
 
         /// Compute device (auto = detect best available)
