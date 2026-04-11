@@ -43,7 +43,10 @@ pub use groupnorm_silu::{
     tensor_to_cube,
 };
 pub use pool3d::{Pool3dOptions, avg_pool3d, max_pool3d};
-pub use quantized_matmul::{GpuQuantType, GpuQuantizedLinear, dequantize_q4k, dequantize_q8_0};
+pub use quantized_matmul::{
+    GpuQuantType, GpuQuantizedLinear, dequantize_q2k, dequantize_q3k, dequantize_q4k,
+    dequantize_q8_0,
+};
 
 // Re-export key types for consumers
 pub use burn_cubecl::{
