@@ -413,16 +413,7 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
             temperature,
             top_p,
             precision,
-            offload_weights,
-        } => run_gguf_command(
-            weights,
-            prompt,
-            max_tokens,
-            temperature,
-            top_p,
-            precision,
-            offload_weights,
-        ),
+        } => run_gguf_command(weights, prompt, max_tokens, temperature, top_p, precision),
         command => {
             // Non-GGUF LLM commands use f32; GGUF has its own precision dispatch above
             #[cfg(feature = "wgpu")]
@@ -450,7 +441,12 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
     }
 }
 
-/// Run GGUF inference with precision-specific backend dispatch
+/// Run GGUF inference with precision-specific backend dispatch.
+///
+/// Inference strategy is selected automatically based on quantization type:
+/// - Q4K/Q8_0 + GPU → GPU-side dequant (keeps quantized bytes in VRAM)
+/// - Q4K/Q8_0 + CPU → CPU-offloaded dequant (keeps quantized bytes in RAM)
+/// - F16/F32 → standard load
 fn run_gguf_command(
     weights: std::path::PathBuf,
     prompt: String,
@@ -458,86 +454,101 @@ fn run_gguf_command(
     temperature: f32,
     top_p: f32,
     precision: Precision,
-    offload_weights: bool,
 ) -> Result<()> {
     #[cfg(feature = "wgpu")]
     {
         use burn::backend::{Wgpu, wgpu::WgpuDevice};
         let device = WgpuDevice::default();
 
+        // GPU-quantized path: keep quantized bytes in VRAM, dequant per forward pass.
+        #[cfg(feature = "cubecl")]
+        {
+            use cubecl::wgpu::WgpuRuntime;
+            use sketchpad_convert::gguf::{GgmlType, GgufFile};
+            let path = weights.to_str().context("Invalid path")?;
+            let is_gpu_quant = GgufFile::open(path)
+                .ok()
+                .and_then(|f| f.tensor_info("blk.0.attn_q.weight").map(|i| i.ggml_type))
+                .is_some_and(GgmlType::is_gpu_quant_supported);
+
+            if is_gpu_quant {
+                return match precision {
+                    #[cfg(feature = "precision-f16")]
+                    Precision::F16 => {
+                        use half::f16;
+                        llm::run_gguf_gpu_quant::<WgpuRuntime, f16, i32, u32>(
+                            weights,
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            burn::tensor::DType::F16,
+                            &device,
+                        )
+                    }
+                    #[cfg(feature = "precision-bf16")]
+                    Precision::Bf16 => {
+                        use half::bf16;
+                        llm::run_gguf_gpu_quant::<WgpuRuntime, bf16, i32, u32>(
+                            weights,
+                            prompt,
+                            max_tokens,
+                            temperature,
+                            top_p,
+                            burn::tensor::DType::BF16,
+                            &device,
+                        )
+                    }
+                    #[cfg(feature = "precision-f32")]
+                    Precision::F32 => llm::run_gguf_gpu_quant::<WgpuRuntime, f32, i32, u32>(
+                        weights,
+                        prompt,
+                        max_tokens,
+                        temperature,
+                        top_p,
+                        burn::tensor::DType::F32,
+                        &device,
+                    ),
+                };
+            }
+        }
+
+        // Standard wgpu path (non-quantized GGUF, or quantized but no cubecl).
+        // Quantized GGUFs are automatically CPU-offloaded inside run_gguf.
         match precision {
             #[cfg(feature = "precision-f32")]
             Precision::F32 => {
                 type B = Wgpu<f32>;
-                llm::run_gguf::<B>(
-                    weights,
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    offload_weights,
-                    &device,
-                )
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
             }
             #[cfg(feature = "precision-f16")]
             Precision::F16 => {
                 use half::f16;
                 type B = Wgpu<f16>;
-                llm::run_gguf::<B>(
-                    weights,
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    offload_weights,
-                    &device,
-                )
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
             }
             #[cfg(feature = "precision-bf16")]
             Precision::Bf16 => {
                 use half::bf16;
                 type B = Wgpu<bf16>;
-                llm::run_gguf::<B>(
-                    weights,
-                    prompt,
-                    max_tokens,
-                    temperature,
-                    top_p,
-                    offload_weights,
-                    &device,
-                )
+                llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
             }
         }
     }
 
-    // CPU fallback: NdArray is f32-only regardless of precision setting
+    // CPU fallback: NdArray is f32-only regardless of precision setting.
+    // Quantized GGUFs are automatically CPU-offloaded inside run_gguf.
     #[cfg(all(feature = "ndarray", not(feature = "wgpu")))]
     {
         use burn_ndarray::NdArray;
         type B = NdArray<f32>;
         let device = Default::default();
-        llm::run_gguf::<B>(
-            weights,
-            prompt,
-            max_tokens,
-            temperature,
-            top_p,
-            offload_weights,
-            &device,
-        )
+        llm::run_gguf::<B>(weights, prompt, max_tokens, temperature, top_p, &device)
     }
 
     #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
     {
-        let _ = (
-            weights,
-            prompt,
-            max_tokens,
-            temperature,
-            top_p,
-            precision,
-            offload_weights,
-        );
+        let _ = (weights, prompt, max_tokens, temperature, top_p, precision);
         anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
     }
 }
@@ -1854,6 +1865,8 @@ fn run_sdxl_generate(
         Device::Wgpu => {
             use burn::backend::{Wgpu, wgpu::WgpuDevice};
             let wgpu_device = WgpuDevice::default();
+            // Flash attention / low_vram / vae_clamp not yet implemented for wgpu SDXL
+            let _ = (flash_attention, low_vram, vae_clamp);
 
             match precision {
                 #[cfg(feature = "precision-f16")]

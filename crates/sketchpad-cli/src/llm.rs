@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use burn::prelude::*;
 use clap::{Subcommand, ValueEnum};
 
-use sketchpad_convert::gguf::{GgufFile, MetadataValue};
+use sketchpad_convert::gguf::{GgmlType, GgufFile, MetadataValue};
 use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
 use sketchpad_llm::gemma4_gguf_loader::{load_gemma4_gguf, load_gemma4_gguf_offloaded};
 use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
@@ -115,6 +115,11 @@ pub enum LlmCommands {
     ///
     /// Supports gemma2 and gemma4 architectures. Tokenizer and chat template
     /// are loaded directly from the GGUF — no separate tokenizer.json needed.
+    ///
+    /// Inference strategy is selected automatically:
+    /// - Q4K/Q8_0 GGUF + GPU backend → GPU-side quantized matmul (best VRAM efficiency)
+    /// - Q4K/Q8_0 GGUF + CPU backend → CPU-offloaded dequant (RAM-resident quantized weights)
+    /// - F16/F32 GGUF → standard load (all weights to device)
     Gguf {
         /// Path to the GGUF model file
         #[arg(short, long)]
@@ -141,13 +146,6 @@ pub enum LlmCommands {
         /// On CPU (ndarray), f32 is always used regardless.
         #[arg(long, value_enum, default_value = "f16")]
         precision: crate::Precision,
-
-        /// CPU-offload attention and dense FFN weights.
-        /// Weights stay in RAM as quantized bytes; dequantized per-token on the fly.
-        /// Halves VRAM use at the cost of PCIe bandwidth per token.
-        /// MoE routed experts are already zero-copy mmap'd and are unaffected.
-        #[arg(long, default_value = "false")]
-        offload_weights: bool,
     },
 
     /// Start an OpenAI-compatible HTTP server
@@ -253,52 +251,85 @@ pub fn run_chat<B: Backend>(
     Ok(())
 }
 
-/// Run inference on a GGUF model file, auto-detecting architecture
+type TokenDecoder = Box<dyn Fn(&[u32]) -> String>;
+
+struct GgufInput {
+    arch: String,
+    /// Whether the projection weights are quantized (non-F16/F32).
+    /// Used to decide between offloaded and standard loading on CPU.
+    is_quantized: bool,
+    /// Decodes a slice of token IDs to a string (wraps tokenizer::decode).
+    decode: TokenDecoder,
+    seq_len: usize,
+    token_ids: Vec<i32>,
+}
+
+fn load_gguf_input(path: &str, prompt: &str) -> Result<GgufInput> {
+    let file = GgufFile::open(path).context("Failed to open GGUF")?;
+
+    let arch = match file.metadata().get("general.architecture") {
+        Some(MetadataValue::String(s)) => s.clone(),
+        _ => "gemma4".to_string(),
+    };
+
+    let is_quantized = file
+        .tensor_info("blk.0.attn_q.weight")
+        .is_some_and(|info| !matches!(info.ggml_type, GgmlType::F32 | GgmlType::F16));
+
+    let formatted = if gguf_tokenizer::raw_chat_template(&file).is_some() {
+        let msgs = [ChatMessage::user(prompt)];
+        gguf_tokenizer::apply_chat_template(&file, &msgs, true)
+            .context("Failed to apply chat template")?
+    } else {
+        prompt.to_string()
+    };
+
+    let tokenizer = gguf_tokenizer::load_tokenizer(&file).context("Failed to load tokenizer")?;
+    let encoding = tokenizer
+        .encode(formatted.as_str(), false)
+        .map_err(|e| anyhow::anyhow!("Tokenize error: {e}"))?;
+    let token_ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
+    let seq_len = token_ids.len();
+
+    let decode = Box::new(move |ids: &[u32]| {
+        tokenizer
+            .decode(ids, true)
+            .unwrap_or_else(|e| format!("<decode error: {e}>"))
+    });
+
+    Ok(GgufInput {
+        arch,
+        is_quantized,
+        decode,
+        seq_len,
+        token_ids,
+    })
+}
+
+/// Run inference on a GGUF model file, auto-detecting architecture and offload strategy.
+///
+/// Quantized GGUFs (Q4K/Q8_0) automatically use CPU-offloaded loading to keep weights
+/// as quantized bytes in RAM. Non-quantized GGUFs are loaded normally.
+/// For GPU-side quantized matmul, `run_gguf_gpu_quant` is used instead (dispatched by the CLI).
 pub fn run_gguf<B: Backend>(
     weights: PathBuf,
     prompt: String,
     max_tokens: usize,
     temperature: f32,
     top_p: f32,
-    offload_weights: bool,
     device: &B::Device,
 ) -> Result<()> {
     let path = weights.to_str().context("Invalid path")?;
+    let input = load_gguf_input(path, &prompt)?;
+    eprintln!(
+        "Architecture: {}  Prompt: {} tokens",
+        input.arch, input.seq_len
+    );
 
-    // Read arch, tokenizer, and chat template from a single GGUF open
-    let (arch, tokenizer, seq_len, token_ids) = {
-        let file = GgufFile::open(path).context("Failed to open GGUF")?;
-
-        let arch = match file.metadata().get("general.architecture") {
-            Some(MetadataValue::String(s)) => s.clone(),
-            _ => "gemma4".to_string(),
-        };
-
-        let formatted = if gguf_tokenizer::raw_chat_template(&file).is_some() {
-            let msgs = [ChatMessage::user(prompt.as_str())];
-            gguf_tokenizer::apply_chat_template(&file, &msgs, true)
-                .context("Failed to apply chat template")?
-        } else {
-            prompt.clone()
-        };
-
-        let tokenizer =
-            gguf_tokenizer::load_tokenizer(&file).context("Failed to load tokenizer")?;
-        let encoding = tokenizer
-            .encode(formatted.as_str(), false)
-            .map_err(|e| anyhow::anyhow!("Tokenize error: {e}"))?;
-        let ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
-        let len = ids.len();
-
-        (arch, tokenizer, len, ids)
-    };
-
-    eprintln!("Architecture: {arch}  Prompt: {seq_len} tokens");
-
-    let data = TensorData::new(token_ids, [1, seq_len]);
+    let data = TensorData::new(input.token_ids.clone(), [1, input.seq_len]);
     let input_ids = Tensor::<B, 2, Int>::from_data(data, device);
 
-    let new_ids: Vec<u32> = match arch.as_str() {
+    let all_ids: Vec<i32> = match input.arch.as_str() {
         "gemma2" => {
             eprintln!("Loading Gemma 2...");
             let start = std::time::Instant::now();
@@ -310,24 +341,22 @@ pub fn run_gguf<B: Backend>(
             let out = model.generate(input_ids, &runtime, max_tokens, temperature);
             let elapsed = t.elapsed().as_secs_f64();
             let all: Vec<i32> = out.to_data().to_vec().unwrap();
-            let n = all.len() - seq_len;
+            let n = all.len() - input.seq_len;
             eprintln!(
                 "{n} tokens in {elapsed:.1}s ({:.1} tok/s)",
                 n as f64 / elapsed
             );
-            all[seq_len..].iter().map(|&id| id as u32).collect()
+            all
         }
         _ => {
-            eprintln!(
-                "Loading Gemma 4{}...",
-                if offload_weights {
-                    " (CPU offload)"
-                } else {
-                    ""
-                }
-            );
+            let label = if input.is_quantized {
+                " (CPU offload)"
+            } else {
+                ""
+            };
+            eprintln!("Loading Gemma 4{label}...");
             let start = std::time::Instant::now();
-            let (model, runtime, _) = if offload_weights {
+            let (model, runtime, _) = if input.is_quantized {
                 load_gemma4_gguf_offloaded::<B, _>(path, device)
                     .context("Failed to load Gemma 4 (offloaded)")?
             } else {
@@ -344,20 +373,82 @@ pub fn run_gguf<B: Backend>(
             let out = model.generate(input_ids, &runtime, max_tokens, &sampler);
             let elapsed = t.elapsed().as_secs_f64();
             let all: Vec<i32> = out.to_data().to_vec().unwrap();
-            let n = all.len() - seq_len;
+            let n = all.len() - input.seq_len;
             eprintln!(
                 "{n} tokens in {elapsed:.1}s ({:.1} tok/s)",
                 n as f64 / elapsed
             );
-            all[seq_len..].iter().map(|&id| id as u32).collect()
+            all
         }
     };
 
-    let generated = tokenizer
-        .decode(&new_ids, true)
-        .unwrap_or_else(|e| format!("<decode error: {e}>"));
-    println!("{generated}");
+    let new_ids: Vec<u32> = all_ids[input.seq_len..]
+        .iter()
+        .map(|&id| id as u32)
+        .collect();
+    println!("{}", (input.decode)(&new_ids));
+    Ok(())
+}
 
+/// Run GPU-quantized inference on a GGUF model file.
+///
+/// Projection weights are uploaded to VRAM as quantized bytes (Q4K/Q8_0) and
+/// dequantized in GPU kernels per forward pass. Achieves 4–8× VRAM savings vs f16
+/// at the cost of per-token dequantization on the GPU.
+#[cfg(feature = "cubecl")]
+pub fn run_gguf_gpu_quant<R, F, I, BT>(
+    weights: PathBuf,
+    prompt: String,
+    max_tokens: usize,
+    temperature: f32,
+    top_p: f32,
+    dtype: burn::tensor::DType,
+    device: &R::Device,
+) -> Result<()>
+where
+    R: burn_cubecl::CubeRuntime + Send + Sync + 'static,
+    F: burn_cubecl::FloatElement,
+    I: burn_cubecl::IntElement,
+    BT: burn_cubecl::BoolElement,
+{
+    use burn_cubecl::CubeBackend;
+    use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf_gpu_quant;
+
+    let path = weights.to_str().context("Invalid path")?;
+    let input = load_gguf_input(path, &prompt)?;
+    eprintln!(
+        "Architecture: {}  Prompt: {} tokens",
+        input.arch, input.seq_len
+    );
+
+    type B<R, F, I, BT> = CubeBackend<R, F, I, BT>;
+
+    let data = TensorData::new(input.token_ids.clone(), [1, input.seq_len]);
+    let input_ids = Tensor::<B<R, F, I, BT>, 2, Int>::from_data(data, device);
+
+    eprintln!("Loading Gemma 4 (GPU quant)...");
+    let start = std::time::Instant::now();
+    let (model, runtime, _) = load_gemma4_gguf_gpu_quant::<R, F, I, BT, _>(path, device, dtype)
+        .context("Failed to load Gemma 4 (GPU quant)")?;
+    eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
+
+    let sampler = SamplerConfig {
+        temperature,
+        top_p,
+        ..SamplerConfig::greedy()
+    };
+    let t = std::time::Instant::now();
+    let out = model.generate(input_ids, &runtime, max_tokens, &sampler);
+    let elapsed = t.elapsed().as_secs_f64();
+    let all: Vec<i32> = out.to_data().to_vec().unwrap();
+    let n = all.len() - input.seq_len;
+    eprintln!(
+        "{n} tokens in {elapsed:.1}s ({:.1} tok/s)",
+        n as f64 / elapsed
+    );
+
+    let new_ids: Vec<u32> = all[input.seq_len..].iter().map(|&id| id as u32).collect();
+    println!("{}", (input.decode)(&new_ids));
     Ok(())
 }
 

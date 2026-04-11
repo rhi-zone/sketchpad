@@ -26,7 +26,7 @@ wgpu = ["burn/wgpu"]
 cuda = ["burn/cuda"]
 
 # CubeCL acceleration (flash attention for f16/bf16) - enabled by default
-cubecl = ["sketchpad/cubecl", "sketchpad-unet/cubecl", "burn-cubecl", "dep:cubecl"]
+cubecl = ["sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl", "dep:cubecl"]
 
 # Precision support - compile only what you need
 precision-f32 = []      # Enable f32 precision (slowest, most stable)

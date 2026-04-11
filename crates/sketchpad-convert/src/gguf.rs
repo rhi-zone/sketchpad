@@ -88,6 +88,11 @@ impl GgmlType {
         }
     }
 
+    /// Whether this quantization type can be dequantized directly on GPU via CubeCL kernels.
+    pub fn is_gpu_quant_supported(self) -> bool {
+        matches!(self, Self::Q4K | Self::Q8_0)
+    }
+
     /// Number of elements per quantization block
     pub fn block_size(self) -> usize {
         match self {
