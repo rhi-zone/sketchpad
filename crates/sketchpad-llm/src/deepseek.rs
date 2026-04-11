@@ -22,7 +22,7 @@ use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 
 use sketchpad_core::glu::{SwiGluFfn, SwiGluFfnConfig};
-use sketchpad_core::kv_cache::ModelKvCache;
+use sketchpad_core::kv_cache::{AttentionCache, ModelKvCache};
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::causal_mask;
@@ -345,6 +345,22 @@ impl<B: Backend> DeepSeekAttention<B> {
         }
     }
 
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        if self.use_mla {
+            self.forward_mla_cached(x, rope, start_pos, mask, cache, layer_idx)
+        } else {
+            self.forward_standard_cached(x, rope, start_pos, mask, cache, layer_idx)
+        }
+    }
+
     fn forward_standard(
         &self,
         x: Tensor<B, 3>,
@@ -378,6 +394,59 @@ impl<B: Backend> DeepSeekAttention<B> {
 
         let attn = match mask {
             Some(m) => attn + m.unsqueeze::<3>().unsqueeze(),
+            None => attn,
+        };
+
+        let attn = burn::tensor::activation::softmax(attn, 3);
+        let out = attn.matmul(v);
+
+        let out = out
+            .swap_dims(1, 2)
+            .reshape([batch, seq_len, self.num_heads * self.head_dim]);
+        self.o_proj.forward(out)
+    }
+
+    fn forward_standard_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        let [batch, seq_len, _hidden] = x.dims();
+
+        let q = self.q_proj.forward(x.clone());
+        let k = self.k_proj.forward(x.clone());
+        let v = self.v_proj.forward(x);
+
+        let q = q
+            .reshape([batch, seq_len, self.num_heads, self.head_dim])
+            .swap_dims(1, 2);
+        let k = k
+            .reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
+            .swap_dims(1, 2);
+        let v = v
+            .reshape([batch, seq_len, self.num_kv_heads, self.head_dim])
+            .swap_dims(1, 2);
+
+        let (q, k) = rope.forward(q, k, start_pos);
+
+        let update = cache.update_layer(layer_idx, k, v);
+        let k = self.repeat_kv(update.k);
+        let v = self.repeat_kv(update.v);
+
+        let total_len = k.dims()[2];
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let attn = q.matmul(k.transpose()) * scale;
+
+        let attn = match mask {
+            Some(m) => {
+                // mask shape is [seq_len, total_len]; unsqueeze for [1, 1, seq_len, total_len]
+                let _ = total_len;
+                attn + m.unsqueeze::<3>().unsqueeze()
+            }
             None => attn,
         };
 
@@ -495,6 +564,117 @@ impl<B: Backend> DeepSeekAttention<B> {
         self.o_proj.forward(out)
     }
 
+    fn forward_mla_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        let [batch, seq_len, _hidden] = x.dims();
+        let q_a = self.q_a_proj.as_ref().unwrap();
+        let q_b = self.q_b_proj.as_ref().unwrap();
+        let kv_a = self.kv_a_proj_with_mqa.as_ref().unwrap();
+        let kv_b = self.kv_b_proj.as_ref().unwrap();
+
+        // Q: compress -> expand
+        let q_compressed = q_a.forward(x.clone());
+        let q = q_b.forward(q_compressed);
+
+        // KV: compress with rope keys, then expand
+        let kv_compressed = kv_a.forward(x);
+
+        // Split compressed KV into latent part and rope keys
+        let latent = kv_compressed
+            .clone()
+            .slice([0..batch, 0..seq_len, 0..self.kv_lora_rank]);
+        let k_rope = kv_compressed.slice([
+            0..batch,
+            0..seq_len,
+            self.kv_lora_rank..self.kv_lora_rank + self.qk_rope_head_dim,
+        ]);
+
+        // Expand latent to get K (nope) and V
+        let kv_expanded = kv_b.forward(latent);
+
+        // Split Q into nope and rope parts
+        let q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim;
+        let q = q.reshape([batch, seq_len, self.num_heads, q_head_dim]);
+        let q_nope = q.clone().slice([
+            0..batch,
+            0..seq_len,
+            0..self.num_heads,
+            0..self.qk_nope_head_dim,
+        ]);
+        let q_rope = q.slice([
+            0..batch,
+            0..seq_len,
+            0..self.num_heads,
+            self.qk_nope_head_dim..q_head_dim,
+        ]);
+
+        // Split expanded KV
+        let v_head_dim = self.qk_nope_head_dim;
+        let kv_per_head = self.qk_nope_head_dim + v_head_dim;
+        let kv_expanded = kv_expanded.reshape([batch, seq_len, self.num_heads, kv_per_head]);
+        let k_nope = kv_expanded.clone().slice([
+            0..batch,
+            0..seq_len,
+            0..self.num_heads,
+            0..self.qk_nope_head_dim,
+        ]);
+        let v = kv_expanded.slice([
+            0..batch,
+            0..seq_len,
+            0..self.num_heads,
+            self.qk_nope_head_dim..kv_per_head,
+        ]);
+
+        // Apply RoPE to rope parts
+        let q_rope = q_rope.swap_dims(1, 2);
+        let k_rope = k_rope
+            .unsqueeze_dim::<4>(2)
+            .repeat_dim(2, self.num_heads)
+            .swap_dims(1, 2);
+
+        let (q_rope, k_rope) = rope.forward(q_rope, k_rope, start_pos);
+
+        let q_rope = q_rope.swap_dims(1, 2);
+        let k_rope = k_rope.swap_dims(1, 2);
+
+        let q = Tensor::cat(vec![q_nope, q_rope], 3);
+        let k_new = Tensor::cat(vec![k_nope, k_rope], 3);
+
+        // Reshape to [batch, heads, seq_len, head_dim] for cache update
+        let k_new = k_new.swap_dims(1, 2);
+        let v = v.swap_dims(1, 2);
+
+        let update = cache.update_layer(layer_idx, k_new, v);
+        let k = update.k;
+        let v = update.v;
+
+        // Standard attention
+        let q = q.swap_dims(1, 2); // [batch, heads, seq_len, head_dim]
+
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let attn = q.matmul(k.transpose()) * scale;
+
+        let attn = match mask {
+            Some(m) => attn + m.unsqueeze::<3>().unsqueeze(),
+            None => attn,
+        };
+
+        let attn = burn::tensor::activation::softmax(attn, 3);
+        let out = attn.matmul(v);
+
+        let out = out
+            .swap_dims(1, 2)
+            .reshape([batch, seq_len, self.num_heads * v_head_dim]);
+        self.o_proj.forward(out)
+    }
+
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         if self.num_kv_heads == self.num_heads {
             return x;
@@ -537,6 +717,26 @@ impl<B: Backend> DeepSeekLayer<B> {
         let normed = self.post_attention_norm.forward(h.clone());
         h + self.ffn.forward(normed)
     }
+
+    pub fn forward_cached(
+        &self,
+        x: Tensor<B, 3>,
+        rope: &RotaryEmbedding<B>,
+        start_pos: usize,
+        mask: Option<Tensor<B, 2>>,
+        cache: &mut dyn AttentionCache<B>,
+        layer_idx: usize,
+    ) -> Tensor<B, 3> {
+        // Pre-norm attention with cache
+        let normed = self.input_norm.forward(x.clone());
+        let h = x + self
+            .attention
+            .forward_cached(normed, rope, start_pos, mask, cache, layer_idx);
+
+        // Pre-FFN norm
+        let normed = self.post_attention_norm.forward(h.clone());
+        h + self.ffn.forward(normed)
+    }
 }
 
 /// DeepSeek Model
@@ -565,24 +765,46 @@ impl<B: Backend> DeepSeek<B> {
         &self,
         input_ids: Tensor<B, 2, Int>,
         runtime: &DeepSeekRuntime<B>,
-        mut cache: Option<&mut ModelKvCache<B>>,
+        cache: Option<&mut dyn AttentionCache<B>>,
     ) -> DeepSeekOutput<B> {
         let [_batch, seq_len] = input_ids.dims();
         let device = input_ids.device();
 
-        let start_pos = cache.as_ref().map(|c| c.seq_len()).unwrap_or(0);
-
         let mut hidden_states = self.embed_tokens.forward(input_ids);
 
-        let mask = if seq_len > 1 {
-            Some(causal_mask::<B>(seq_len, &device))
-        } else {
-            None
-        };
+        match cache {
+            Some(cache) => {
+                let start_pos = cache.seq_len();
 
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let _ = cache.as_mut().map(|c| c.layer(layer_idx));
-            hidden_states = layer.forward(hidden_states, &runtime.rope, start_pos, mask.clone());
+                let mask = if seq_len > 1 {
+                    let total_len = start_pos + seq_len;
+                    Some(prefill_causal_mask::<B>(seq_len, total_len, &device))
+                } else {
+                    None
+                };
+
+                for (layer_idx, layer) in self.layers.iter().enumerate() {
+                    hidden_states = layer.forward_cached(
+                        hidden_states,
+                        &runtime.rope,
+                        start_pos,
+                        mask.clone(),
+                        cache,
+                        layer_idx,
+                    );
+                }
+            }
+            None => {
+                let mask = if seq_len > 1 {
+                    Some(causal_mask::<B>(seq_len, &device))
+                } else {
+                    None
+                };
+
+                for layer in &self.layers {
+                    hidden_states = layer.forward(hidden_states, &runtime.rope, 0, mask.clone());
+                }
+            }
         }
 
         hidden_states = self.norm.forward(hidden_states);
@@ -595,39 +817,84 @@ impl<B: Backend> DeepSeek<B> {
         }
     }
 
+    /// Generate text autoregressively with KV caching
+    ///
+    /// Uses incremental generation: the prompt is processed in one pass (prefill),
+    /// then each subsequent token is generated by only computing the new token
+    /// against cached K/V from previous steps.
     pub fn generate(
         &self,
         input_ids: Tensor<B, 2, Int>,
         runtime: &DeepSeekRuntime<B>,
         max_new_tokens: usize,
-        temperature: f32,
+        sampler: &crate::sampling::SamplerConfig,
     ) -> Tensor<B, 2, Int> {
         let [batch, _prompt_len] = input_ids.dims();
-        let mut all_tokens = input_ids;
+        let mut cache =
+            ModelKvCache::<B>::new(runtime.config.num_layers, runtime.config.max_seq_len);
 
-        for _ in 0..max_new_tokens {
-            let output = self.forward(all_tokens.clone(), runtime, None);
+        // Track generated token IDs for repetition/DRY penalties
+        let input_data: Vec<i64> = input_ids.to_data().to_vec().unwrap();
+        let mut context_tokens: Vec<u32> = input_data.iter().map(|&id| id as u32).collect();
 
-            let seq_len = all_tokens.dims()[1];
-            let last_logits = output.logits.slice([
-                0..batch,
-                (seq_len - 1)..seq_len,
-                0..runtime.config.vocab_size,
-            ]);
+        // Prefill: process the entire prompt at once
+        let output = self.forward(input_ids.clone(), runtime, Some(&mut cache));
+
+        let seq_len = input_ids.dims()[1];
+        let last_logits = output.logits.slice([
+            0..batch,
+            (seq_len - 1)..seq_len,
+            0..runtime.config.vocab_size,
+        ]);
+        let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
+        let token_id = crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+        context_tokens.push(token_id);
+
+        let device = input_ids.device();
+        let mut next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
+        let mut all_tokens = Tensor::cat(vec![input_ids, next_token.clone()], 1);
+
+        // Decode: generate one token at a time using the cache
+        for _ in 1..max_new_tokens {
+            let output = self.forward(next_token, runtime, Some(&mut cache));
+
+            let last_logits = output
+                .logits
+                .slice([0..batch, 0..1, 0..runtime.config.vocab_size]);
             let last_logits = last_logits.reshape([batch, runtime.config.vocab_size]);
+            let token_id =
+                crate::sampling::sample_from_logits(last_logits, &context_tokens, sampler);
+            context_tokens.push(token_id);
 
-            let scaled_logits = if (temperature - 1.0).abs() > 1e-6 {
-                last_logits / temperature
-            } else {
-                last_logits
-            };
-
-            let next_token = scaled_logits.argmax(1).reshape([batch, 1]);
-            all_tokens = Tensor::cat(vec![all_tokens, next_token], 1);
+            next_token = Tensor::<B, 2, Int>::from_ints([[token_id as i32]], &device);
+            all_tokens = Tensor::cat(vec![all_tokens, next_token.clone()], 1);
         }
 
         all_tokens
     }
+}
+
+/// Creates a causal mask for prefill with cached positions
+///
+/// When there are already `start_pos` cached tokens, new tokens at positions
+/// `[start_pos, start_pos + new_len)` should be able to attend to all positions
+/// `[0, start_pos + new_len)` but not to future positions within the new chunk.
+///
+/// Returns a mask of shape [new_len, total_len] where total_len = start_pos + new_len.
+fn prefill_causal_mask<B: Backend>(
+    new_len: usize,
+    total_len: usize,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let start_pos = total_len - new_len;
+    let mut mask_data = vec![0.0f32; new_len * total_len];
+    for i in 0..new_len {
+        let global_pos = start_pos + i;
+        for j in (global_pos + 1)..total_len {
+            mask_data[i * total_len + j] = f32::NEG_INFINITY;
+        }
+    }
+    Tensor::<B, 1>::from_floats(mask_data.as_slice(), device).reshape([new_len, total_len])
 }
 
 #[cfg(test)]
@@ -657,7 +924,12 @@ mod tests {
         let (model, runtime) = config.init::<TestBackend>(&device);
 
         let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
-        let generated = model.generate(prompt, &runtime, 3, 1.0);
+        let generated = model.generate(
+            prompt,
+            &runtime,
+            3,
+            &crate::sampling::SamplerConfig::greedy(),
+        );
 
         assert_eq!(generated.dims(), [1, 5]);
     }

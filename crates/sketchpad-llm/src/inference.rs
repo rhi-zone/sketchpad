@@ -516,12 +516,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Qwen(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
-            ModelInstance::DeepSeek(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::DeepSeek(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
             ModelInstance::Rwkv(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
