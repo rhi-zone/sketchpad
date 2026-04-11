@@ -213,6 +213,7 @@ fn load_gemma4_layer<B: Backend>(
         pre_ffn_norm,
         post_ffn_norm,
         use_sliding_window,
+        layer_output_scale: 1.0,
     })
 }
 
@@ -378,6 +379,7 @@ fn load_gemma4_moe<B: Backend>(
 
     Ok(Gemma4MoE {
         router,
+        router_norm: None,
         experts: ExpertWeights::Full(experts),
         shared_experts,
         top_k: config.num_experts_per_tok,

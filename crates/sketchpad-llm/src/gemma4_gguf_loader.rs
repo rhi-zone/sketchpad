@@ -314,6 +314,16 @@ fn load_layer<B: Backend>(
     // Local layers use sliding window; global layers use full causal mask.
     let use_sliding_window = attention.head_dim < config.head_dim;
 
+    // Per-layer output scale (used in "heretic"-style distilled models).
+    // If the tensor is absent, default to 1.0 (no scaling).
+    let layer_output_scale = if file.contains(&format!("blk.{idx}.layer_output_scale.weight")) {
+        let t: Tensor<B, 1> =
+            file.load_f32(&format!("blk.{idx}.layer_output_scale.weight"), device)?;
+        t.into_scalar().elem::<f32>()
+    } else {
+        1.0
+    };
+
     Ok(Gemma4Layer {
         attention,
         ffn,
@@ -322,6 +332,7 @@ fn load_layer<B: Backend>(
         pre_ffn_norm,
         post_ffn_norm,
         use_sliding_window,
+        layer_output_scale,
     })
 }
 
@@ -541,8 +552,24 @@ fn load_moe<B: Backend>(
         )?,
     };
 
+    // Optional router input normalization (heretic models store ffn_gate_inp.scale).
+    // The router operates on rms_norm(h) / sqrt(hidden_size) * ffn_gate_inp_scale,
+    // which is equivalent to RmsNorm with weight = ffn_gate_inp_scale / sqrt(hidden_size).
+    let router_norm = {
+        let scale_name = format!("blk.{idx}.ffn_gate_inp.scale");
+        if file.contains(&scale_name) {
+            let scale: Tensor<B, 1> = file.load_f32(&scale_name, device)?;
+            let inv_sqrt = (config.hidden_size as f32).sqrt().recip();
+            let weight = scale * inv_sqrt;
+            Some(RmsNorm::from_weight(weight, config.norm_eps))
+        } else {
+            None
+        }
+    };
+
     Ok(Gemma4MoE {
         router,
+        router_norm,
         experts,
         shared_experts: vec![shared_expert],
         top_k: config.num_experts_per_tok,

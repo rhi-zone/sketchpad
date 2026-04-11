@@ -253,6 +253,7 @@ impl Gemma4LayerConfig {
             pre_ffn_norm: RmsNorm::with_eps(self.hidden_size, self.norm_eps, device),
             post_ffn_norm: RmsNorm::with_eps(self.hidden_size, self.norm_eps, device),
             use_sliding_window: self.use_sliding_window,
+            layer_output_scale: 1.0,
         }
     }
 }
@@ -422,6 +423,10 @@ impl<B: Backend> Gemma4ExpertFfn<B> {
 pub struct Gemma4MoE<B: Backend> {
     /// Router: linear projection from hidden_size to num_experts
     pub router: Linear<B>,
+    /// Optional router input norm (for heretic-style models with ffn_gate_inp.scale).
+    /// Weight = ffn_gate_inp_scale / sqrt(hidden_size). Applied to the raw pre-FFN
+    /// hidden state before routing (not to the pre_ffn_norm output used by experts).
+    pub router_norm: Option<RmsNorm<B>>,
     /// Sparse experts (selected by router) — either full-precision or quantized
     pub experts: ExpertWeights<B>,
     /// Shared experts (always active, output added to routed output)
@@ -488,6 +493,7 @@ impl<B: Backend> Gemma4MoE<B> {
 
         Self {
             router,
+            router_norm: None,
             experts,
             shared_experts,
             top_k,
@@ -495,7 +501,12 @@ impl<B: Backend> Gemma4MoE<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    /// Forward pass.
+    ///
+    /// - `x`: expert input (output of pre_ffn_norm applied to the hidden state)
+    /// - `router_raw`: raw hidden state before pre_ffn_norm, used as router input when
+    ///   `router_norm` is set (heretic models with `ffn_gate_inp.scale`)
+    pub fn forward(&self, x: Tensor<B, 3>, router_raw: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
         let [batch, seq_len, hidden_size] = x.dims();
         let num_tokens = batch * seq_len;
         let device = x.device();
@@ -503,8 +514,14 @@ impl<B: Backend> Gemma4MoE<B> {
         // Flatten to [num_tokens, hidden_size]
         let x_flat = x.clone().reshape([num_tokens, hidden_size]);
 
+        // Router input: use normalized raw hidden state if available, else fall back to x
+        let router_input_flat = match (&self.router_norm, router_raw) {
+            (Some(norm), Some(raw)) => norm.forward(raw).reshape([num_tokens, hidden_size]),
+            _ => x_flat.clone(),
+        };
+
         // Router logits: [num_tokens, num_experts]
-        let logits: Tensor<B, 2> = self.router.forward(x_flat.clone());
+        let logits: Tensor<B, 2> = self.router.forward(router_input_flat);
 
         // Softmax over experts
         let probs = burn::tensor::activation::softmax(logits, 1);
@@ -607,10 +624,10 @@ pub enum Gemma4Ffn<B: Backend> {
 }
 
 impl<B: Backend> Gemma4Ffn<B> {
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<B, 3>, router_raw: Option<Tensor<B, 3>>) -> Tensor<B, 3> {
         match self {
             Self::Dense(ffn) => ffn.forward(x),
-            Self::Moe(moe) => moe.forward(x),
+            Self::Moe(moe) => moe.forward(x, router_raw),
         }
     }
 }
@@ -625,6 +642,10 @@ pub struct Gemma4Layer<B: Backend> {
     pub pre_ffn_norm: RmsNorm<B>,
     pub post_ffn_norm: RmsNorm<B>,
     pub use_sliding_window: bool,
+    /// Per-layer output scale (1.0 for standard Gemma 4; <1.0 for "heretic"-style
+    /// distilled models where early layers contribute very little to the residual stream).
+    /// Applied as: h = x + scale * attn_residual; out = h + scale * ffn_residual.
+    pub layer_output_scale: f32,
 }
 
 impl<B: Backend> Gemma4Layer<B> {
@@ -704,14 +725,24 @@ impl<B: Backend> Gemma4Layer<B> {
                 .attention
                 .forward(normed, rope, start_pos, mask, softcap),
         };
-        // Post-attention norm + residual
-        let h = x + self.post_attention_norm.forward(attn_out);
+        // Post-attention norm + residual (scaled if layer_output_scale != 1.0)
+        let attn_residual = self.post_attention_norm.forward(attn_out);
+        let h = if self.layer_output_scale == 1.0 {
+            x + attn_residual
+        } else {
+            x + attn_residual * self.layer_output_scale
+        };
 
-        // Pre-FFN norm
+        // Pre-FFN norm — h (raw) is passed as router_raw so MoE can use its own normalization
         let normed = self.pre_ffn_norm.forward(h.clone());
-        let ffn_out = self.ffn.forward(normed);
-        // Post-FFN norm + residual
-        h + self.post_ffn_norm.forward(ffn_out)
+        let ffn_out = self.ffn.forward(normed, Some(h.clone()));
+        // Post-FFN norm + residual (scaled if layer_output_scale != 1.0)
+        let ffn_residual = self.post_ffn_norm.forward(ffn_out);
+        if self.layer_output_scale == 1.0 {
+            h + ffn_residual
+        } else {
+            h + ffn_residual * self.layer_output_scale
+        }
     }
 }
 
@@ -775,7 +806,6 @@ impl<B: Backend> Gemma4<B> {
                 };
 
                 for (layer_idx, layer) in self.layers.iter().enumerate() {
-                    let layer_start = std::time::Instant::now();
                     hidden_states = layer.forward_cached(
                         hidden_states,
                         &runtime.ropes,
@@ -785,11 +815,6 @@ impl<B: Backend> Gemma4<B> {
                         runtime.config.attn_logit_softcap,
                         cache,
                         layer_idx,
-                    );
-                    eprintln!(
-                        "  layer {layer_idx}/{}: {:.2}s",
-                        self.layers.len(),
-                        layer_start.elapsed().as_secs_f64()
                     );
                 }
             }
@@ -1027,7 +1052,7 @@ mod tests {
         let moe = Gemma4MoE::new(64, 128, 128, 4, 1, 2, &device);
 
         let x = Tensor::<TestBackend, 3>::zeros([1, 4, 64], &device);
-        let out = moe.forward(x);
+        let out = moe.forward(x, None);
 
         assert_eq!(out.dims(), [1, 4, 64]);
     }
