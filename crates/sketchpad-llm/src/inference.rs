@@ -510,12 +510,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Gemma(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
-            ModelInstance::Phi(model, runtime) => model.generate(
-                input_ids,
-                runtime,
-                config.max_tokens,
-                config.sampler.temperature,
-            ),
+            ModelInstance::Phi(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
             ModelInstance::Qwen(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
