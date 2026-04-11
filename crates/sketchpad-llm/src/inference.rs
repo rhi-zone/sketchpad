@@ -450,7 +450,7 @@ impl<B: Backend> LlmInstance<B> {
         let output_tensor = self.generate_tokens(input_tensor, config);
 
         // Extract generated portion (skip prompt tokens)
-        let output_ids: Vec<i32> = output_tensor.to_data().to_vec().unwrap();
+        let output_ids: Vec<i64> = output_tensor.to_data().to_vec().unwrap();
         let generated_ids: Vec<u32> = output_ids
             .into_iter()
             .skip(seq_len)
@@ -681,6 +681,8 @@ fn parse_gemma4_config(json: &str) -> Result<Gemma4Config, LlmError> {
         final_logit_softcap: v["final_logit_softcapping"].as_f64().unwrap_or(30.0) as f32,
         norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
         rope_base: v["rope_theta"].as_f64().unwrap_or(1000000.0) as f32,
+        rope_base_swa: v["rope_theta_swa"].as_f64().unwrap_or(10000.0) as f32,
+        head_dim_swa: v["head_dim_swa"].as_u64().unwrap_or(head_dim as u64) as usize,
         num_experts: num_experts.max(1), // at least 1 for dense FFN construction
         num_shared_experts: v["num_shared_experts"]
             .as_u64()

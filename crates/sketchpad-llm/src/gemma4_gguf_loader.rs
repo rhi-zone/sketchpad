@@ -95,6 +95,11 @@ pub fn parse_gguf_config(file: &GgufFile) -> Result<Gemma4Config, Gemma4GgufLoad
         &format!("{arch}.attention.key_length"),
         (hidden_size / num_heads) as u64,
     ) as usize;
+    let head_dim_swa = meta_u64_or(
+        file,
+        &format!("{arch}.attention.key_length_swa"),
+        head_dim as u64,
+    ) as usize;
 
     let num_experts = meta_u64_or(file, &format!("{arch}.expert_count"), 0) as usize;
     let num_experts_per_tok = meta_u64_or(
@@ -145,6 +150,8 @@ pub fn parse_gguf_config(file: &GgufFile) -> Result<Gemma4Config, Gemma4GgufLoad
             1e-6,
         ) as f64,
         rope_base: meta_f32_or(file, &format!("{arch}.rope.freq_base"), 1_000_000.0),
+        rope_base_swa: meta_f32_or(file, &format!("{arch}.rope.freq_base_swa"), 10_000.0),
+        head_dim_swa,
         num_experts: num_experts.max(1),
         num_shared_experts,
         num_experts_per_tok,
@@ -176,12 +183,18 @@ pub fn load_gemma4_gguf<B: Backend, P: AsRef<Path>>(
         device,
     )?;
 
-    // Collect all unique head_dims from loaded layers and create per-dim RoPE
+    // Create per-head-dim RoPE with the correct base frequency:
+    // global layers use rope_base (1e6), local/SWA layers use rope_base_swa (1e4)
     let mut ropes = std::collections::HashMap::new();
     for layer in &layers {
         let hd = layer.attention.head_dim;
         ropes.entry(hd).or_insert_with(|| {
-            RotaryEmbedding::with_base(hd, config.max_seq_len, config.rope_base, device)
+            let base = if hd == config.head_dim {
+                config.rope_base
+            } else {
+                config.rope_base_swa
+            };
+            RotaryEmbedding::with_base(hd, config.max_seq_len, base, device)
         });
     }
 
@@ -297,9 +310,9 @@ fn load_layer<B: Backend>(
         device,
     )?;
 
-    // Global attention layers have a larger head_dim (e.g. 512 vs 256 for local).
-    // Infer from the loaded attention rather than hardcoding a layer-index pattern.
-    let use_sliding_window = attention.head_dim == config.head_dim;
+    // Global attention layers have a larger head_dim (512) than local/SWA layers (256).
+    // Local layers use sliding window; global layers use full causal mask.
+    let use_sliding_window = attention.head_dim < config.head_dim;
 
     Ok(Gemma4Layer {
         attention,

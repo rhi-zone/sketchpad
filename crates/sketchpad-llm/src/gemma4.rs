@@ -59,8 +59,12 @@ pub struct Gemma4Config {
     pub final_logit_softcap: f32,
     /// RMSNorm epsilon
     pub norm_eps: f64,
-    /// RoPE base frequency
+    /// RoPE base frequency (global attention)
     pub rope_base: f32,
+    /// RoPE base frequency for local/SWA attention layers
+    pub rope_base_swa: f32,
+    /// Head dimension for local/SWA attention layers (may differ from head_dim)
+    pub head_dim_swa: usize,
     /// Total number of experts
     pub num_experts: usize,
     /// Number of shared experts (always active)
@@ -92,6 +96,8 @@ impl Gemma4Config {
             final_logit_softcap: 30.0,
             norm_eps: 1e-6,
             rope_base: 1000000.0,
+            rope_base_swa: 10000.0,
+            head_dim_swa: 256,
             num_experts: 128,
             num_shared_experts: 1,
             num_experts_per_tok: 8,
@@ -116,6 +122,8 @@ impl Gemma4Config {
             final_logit_softcap: 30.0,
             norm_eps: 1e-6,
             rope_base: 10000.0,
+            rope_base_swa: 10000.0,
+            head_dim_swa: 32,
             num_experts: 4,
             num_shared_experts: 1,
             num_experts_per_tok: 2,
@@ -140,9 +148,10 @@ impl Gemma4Config {
                     num_kv_heads: self.num_kv_heads,
                     head_dim: self.head_dim,
                     norm_eps: self.norm_eps,
-                    // Local attention has the config's default head_dim; global layers are larger.
-                    // For the programmatic init path (testing), use head_dim from config as local.
-                    use_sliding_window: true,
+                    // In the programmatic init path (testing), MoE layers are treated as global
+                    // attention (no sliding window) and dense layers as local (sliding window).
+                    // Real model loading derives this from per-layer head_dim via the GGUF loader.
+                    use_sliding_window: !is_moe,
                     is_moe,
                     num_experts: self.num_experts,
                     num_shared_experts: self.num_shared_experts,
