@@ -27,6 +27,15 @@ const GGML_TYPE_Q3_K: u32 = 11;
 const GGML_TYPE_Q4_K: u32 = 12;
 const GGML_TYPE_Q5_K: u32 = 13;
 const GGML_TYPE_Q6_K: u32 = 14;
+const GGML_TYPE_IQ2_XXS: u32 = 16;
+const GGML_TYPE_IQ2_XS: u32 = 17;
+const GGML_TYPE_IQ3_XXS: u32 = 18;
+const GGML_TYPE_IQ1_S: u32 = 19;
+const GGML_TYPE_IQ4_NL: u32 = 20;
+const GGML_TYPE_IQ3_S: u32 = 21;
+const GGML_TYPE_IQ2_S: u32 = 22;
+const GGML_TYPE_IQ4_XS: u32 = 23;
+const GGML_TYPE_IQ1_M: u32 = 29;
 
 #[derive(Error, Debug)]
 pub enum GgufError {
@@ -73,6 +82,15 @@ pub enum GgmlType {
     Q4K,
     Q5K,
     Q6K,
+    IQ2Xxs,
+    IQ2Xs,
+    IQ3Xxs,
+    IQ1S,
+    IQ4Nl,
+    IQ3S,
+    IQ2S,
+    IQ4Xs,
+    IQ1M,
 }
 
 impl GgmlType {
@@ -90,6 +108,15 @@ impl GgmlType {
             GGML_TYPE_Q4_K => Ok(Self::Q4K),
             GGML_TYPE_Q5_K => Ok(Self::Q5K),
             GGML_TYPE_Q6_K => Ok(Self::Q6K),
+            GGML_TYPE_IQ2_XXS => Ok(Self::IQ2Xxs),
+            GGML_TYPE_IQ2_XS => Ok(Self::IQ2Xs),
+            GGML_TYPE_IQ3_XXS => Ok(Self::IQ3Xxs),
+            GGML_TYPE_IQ1_S => Ok(Self::IQ1S),
+            GGML_TYPE_IQ4_NL => Ok(Self::IQ4Nl),
+            GGML_TYPE_IQ3_S => Ok(Self::IQ3S),
+            GGML_TYPE_IQ2_S => Ok(Self::IQ2S),
+            GGML_TYPE_IQ4_XS => Ok(Self::IQ4Xs),
+            GGML_TYPE_IQ1_M => Ok(Self::IQ1M),
             _ => Err(GgufError::UnsupportedQuantType(v)),
         }
     }
@@ -105,6 +132,9 @@ impl GgmlType {
             Self::F32 | Self::F16 => 1,
             Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 => 32,
             Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            Self::IQ2Xxs | Self::IQ2Xs | Self::IQ3Xxs | Self::IQ1S => 256,
+            Self::IQ3S | Self::IQ2S | Self::IQ4Xs | Self::IQ1M => 256,
+            Self::IQ4Nl => 32,
         }
     }
 
@@ -123,6 +153,15 @@ impl GgmlType {
             Self::Q2K => 16 + 64 + 2 + 2,       // scales + quants + f16 d + f16 dmin = 84
             Self::Q3K => 32 + 64 + 12 + 2,      // hmask + qs + scales + f16 d = 110
             Self::Q6K => 128 + 64 + 16 + 2,     // ql + qh + scales + f16 d = 210
+            Self::IQ2Xxs => 66,                 // 2+64
+            Self::IQ2Xs => 66,                  // 2+64
+            Self::IQ3Xxs => 98,
+            Self::IQ1S => 32,
+            Self::IQ4Nl => 18,
+            Self::IQ3S => 110,
+            Self::IQ2S => 80,
+            Self::IQ4Xs => 136,
+            Self::IQ1M => 36,
         }
     }
 }
@@ -557,6 +596,17 @@ pub fn dequantize(
         GgmlType::Q4K => dequantize_q4_k(data, &mut output),
         GgmlType::Q5K => dequantize_q5_k(data, &mut output),
         GgmlType::Q6K => dequantize_q6_k(data, &mut output),
+        GgmlType::IQ2Xxs
+        | GgmlType::IQ2Xs
+        | GgmlType::IQ3Xxs
+        | GgmlType::IQ1S
+        | GgmlType::IQ4Nl
+        | GgmlType::IQ3S
+        | GgmlType::IQ2S
+        | GgmlType::IQ4Xs
+        | GgmlType::IQ1M => {
+            unimplemented!("IQ dequant not yet implemented: {ggml_type:?}")
+        }
     }
 
     Ok(output)
