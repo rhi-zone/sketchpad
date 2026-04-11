@@ -331,8 +331,8 @@ See `docs/cubecl-guide.md` for implementation details.
 - [x] Sampler pipeline - DRY, XTC, repetition penalty, temperature, top-k, top-p, min-p
 - [x] KV cache for LLaMA (prefill+decode with ModelKvCache)
 - [x] KV cache for Gemma 4 (prefill+decode with ModelKvCache)
-- [ ] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
-- [ ] Wire sampler into remaining models (currently Mistral/Mixtral/etc use temperature-only)
+- [x] KV cache for remaining models (Gemma 2, Mistral, Mixtral, Phi, Qwen, DeepSeek)
+- [x] Wire sampler into remaining models (SamplerConfig in all models: LLaMA, Gemma 2/4, Mistral, Mixtral, Phi, Qwen, DeepSeek, RWKV, Mamba, Jamba)
 - [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — currently blocked: non-expert weights dequantized to f16 in VRAM (~15-20GB for 26B); expert weights in RAM as raw Q4K bytes
 - [ ] Anthropic-compatible HTTP API adapter
 - [ ] TurboQuant KV cache compression (PolarQuant + QJL, integrates into PagedKvCache)
@@ -371,18 +371,14 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
   on load. VRAM-aware dispatch via `--vram GB` CLI flag.
 
 #### GGUF Quantization Coverage Gaps
-- [ ] **Missing GgmlType variants**: Q2_K (type 10), Q3_K (type 11) — used in Q3_K_S/M/L model
-  filenames (S/M/L = layer mix, not a separate type). IQ types: IQ2_XXS (16), IQ2_XS (17),
-  IQ3_XXS (18), IQ1_S (19), IQ4_NL (20), IQ3_S (21), IQ2_S (22), IQ4_XS (23), IQ1_M (29).
-  Currently `GgufFile::open()` returns `UnsupportedQuantType` error for any of these.
-- [ ] **CPU dequant for Q2_K**: 84 bytes/block of 256 elements. Block layout: 16-byte scales,
-  64-byte 2-bit quants, f16 d, f16 dmin.
-- [ ] **CPU dequant for Q3_K**: 110 bytes/block of 256 elements. Block layout: 32-byte high-bit
-  mask, 64-byte 2-bit lower quants, 12-byte scales, f16 d.
-- [ ] **CPU dequant for IQ4_XS and other IQ types**: lookup-table-based, more complex than K-quants.
-  Lower priority; Q2_K and Q3_K cover most practical models.
-- [ ] **GPU kernels for Q2_K, Q3_K**: extend `sketchpad-cubecl::quantized_matmul` with new
-  `GpuQuantType` variants and CubeCL kernel implementations. Medium work.
+- [x] **Missing GgmlType variants**: Q2_K (10), Q3_K (11), IQ4_NL (20), IQ4_XS (23), IQ2_XXS (16),
+  IQ2_XS (17), IQ3_XXS (18), IQ1_S (19), IQ3_S (21), IQ2_S (22), IQ1_M (29) — all added.
+- [x] **CPU dequant for Q2_K**: implemented `dequantize_q2_k` (84 bytes/256 elements).
+- [x] **CPU dequant for Q3_K**: implemented `dequantize_q3_k` (110 bytes/256 elements).
+- [x] **CPU dequant for IQ4_NL and IQ4_XS**: lookup-table-based implementation done.
+- [x] **CPU dequant for remaining IQ types**: IQ2_XXS, IQ2_XS, IQ3_XXS, IQ1_S, IQ3_S, IQ2_S,
+  IQ1_M all implemented via grid lookup tables ported from llama.cpp ggml-quants.c.
+- [x] **GPU kernels for Q2_K, Q3_K**: CubeCL kernels in `sketchpad-cubecl::quantized_matmul`.
 - [ ] **GPU kernels for IQ types**: large work, low priority (IQ types are niche).
 
 ### Shared Building Blocks (burn-models-core)
@@ -424,7 +420,7 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 #### Alternative Architectures (Production-Ready)
 - [x] RWKV-7 "Goose" - RNN with transformer performance, linear time/constant space, no KV cache
 - [x] Mamba / Mamba-2 - Selective state space models, linear scaling, 5x faster inference than transformers
-- [x] Jamba - AI21's Transformer-Mamba-MoE hybrid, 1:7 attention:Mamba ratio, 256K context
+- [x] Jamba - AI21's Transformer-Mamba-MoE hybrid, 1:7 attention:Mamba ratio, 256K context, KV cache for attention layers
 
 #### Fast Image Generation
 - [x] SANA - NVIDIA's linear DiT, 32x compression, 4K images on laptop GPU in <1s
