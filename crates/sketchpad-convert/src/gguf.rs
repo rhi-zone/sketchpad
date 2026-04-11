@@ -596,14 +596,14 @@ pub fn dequantize(
         GgmlType::Q4K => dequantize_q4_k(data, &mut output),
         GgmlType::Q5K => dequantize_q5_k(data, &mut output),
         GgmlType::Q6K => dequantize_q6_k(data, &mut output),
+        GgmlType::IQ4Nl => dequantize_iq4_nl(data, &mut output),
+        GgmlType::IQ4Xs => dequantize_iq4_xs(data, &mut output),
         GgmlType::IQ2Xxs
         | GgmlType::IQ2Xs
         | GgmlType::IQ3Xxs
         | GgmlType::IQ1S
-        | GgmlType::IQ4Nl
         | GgmlType::IQ3S
         | GgmlType::IQ2S
-        | GgmlType::IQ4Xs
         | GgmlType::IQ1M => {
             unimplemented!("IQ dequant not yet implemented: {ggml_type:?}")
         }
@@ -910,6 +910,63 @@ fn dequantize_q6_k(data: &[u8], output: &mut [f32]) {
                 let qh_val = (qh[idx / 4] >> ((idx % 4) * 2)) & 0x03;
                 let q = ((ql_val as i32) | ((qh_val as i32) << 4)) - 32;
                 out[idx] = d * scale * q as f32;
+            }
+        }
+    }
+}
+
+const IQ4NL_VALUES: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
+/// IQ4_NL: block of 32 values. Layout: f16 scale (2 bytes) + 16 bytes of 4-bit packed quants
+fn dequantize_iq4_nl(data: &[u8], output: &mut [f32]) {
+    const BLOCK_SIZE: usize = 18;
+
+    for (block_idx, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+        let d = read_f16(block, 0);
+        let qs = &block[2..18];
+        let out = &mut output[block_idx * 32..(block_idx + 1) * 32];
+
+        for i in 0..32 {
+            let byte = qs[i / 2];
+            let nibble = if i % 2 == 0 {
+                byte & 0xf
+            } else {
+                (byte >> 4) & 0xf
+            };
+            out[i] = d * IQ4NL_VALUES[nibble as usize] as f32;
+        }
+    }
+}
+
+/// IQ4_XS: super-block of 256 values. Layout: f16 d (2 bytes) + 1 byte scales_h +
+/// 4 bytes scales_l + 128 bytes 4-bit packed quants
+fn dequantize_iq4_xs(data: &[u8], output: &mut [f32]) {
+    const BLOCK_SIZE: usize = 136;
+
+    for (block_idx, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+        let d = read_f16(block, 0);
+        let scales_h = block[2];
+        let scales_l = &block[3..7];
+        let qs = &block[7..135];
+        let out = &mut output[block_idx * 256..(block_idx + 1) * 256];
+
+        for sb in 0..8usize {
+            let low4 = (scales_l[sb / 2] >> (4 * (sb % 2))) & 0xf;
+            let high2 = (scales_h >> (2 * sb)) & 0x3;
+            let scale_raw = (high2 << 4) | low4;
+            let signed_scale = (scale_raw as i32) - 32;
+
+            for pos in 0..32usize {
+                let byte = qs[sb * 16 + pos / 2];
+                let nibble = if pos % 2 == 0 {
+                    byte & 0xf
+                } else {
+                    (byte >> 4) & 0xf
+                };
+                out[sb * 32 + pos] =
+                    d * (signed_scale as f32) * IQ4NL_VALUES[nibble as usize] as f32;
             }
         }
     }
