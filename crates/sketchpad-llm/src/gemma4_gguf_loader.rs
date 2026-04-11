@@ -308,41 +308,67 @@ fn load_attention<B: Backend>(
     config: &Gemma4Config,
     device: &B::Device,
 ) -> Result<Gemma4Attention<B>, Gemma4GgufLoadError> {
-    let q_dim = config.head_dim * config.num_heads;
-    let kv_dim = config.head_dim * config.num_kv_heads;
+    let q_name = format!("blk.{idx}.attn_q.weight");
+    let k_name = format!("blk.{idx}.attn_k.weight");
+    let v_name = format!("blk.{idx}.attn_v.weight");
+    let o_name = format!("blk.{idx}.attn_output.weight");
+
+    // Infer per-layer attention dimensions from tensor shapes
+    // Q shape: [hidden_size, q_dim] where q_dim = num_heads * head_dim
+    // K shape: [hidden_size, kv_dim] where kv_dim = num_kv_heads * head_dim
+    let q_info = file
+        .tensor_info(&q_name)
+        .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(q_name.clone()))?;
+    let k_info = file
+        .tensor_info(&k_name)
+        .ok_or_else(|| Gemma4GgufLoadError::MissingTensor(k_name.clone()))?;
+
+    let q_dim = q_info.shape[1];
+    let kv_dim = k_info.shape[1];
+
+    // Determine head_dim from Q norm if available, else from config
+    let head_dim =
+        if let Some(norm_info) = file.tensor_info(&format!("blk.{idx}.attn_q_norm.weight")) {
+            norm_info.shape[0]
+        } else {
+            config.head_dim
+        };
+
+    let num_heads = q_dim / head_dim;
+    let num_kv_heads = kv_dim / head_dim;
+
+    let q_proj = load_linear(file, &q_name, config.hidden_size, q_dim, device)?;
+
+    // Some layers (global attention) tie V to K — no attn_v.weight exists
+    // Load K weight once and share if needed
+    let k_weight: Tensor<B, 2> = file.load_f32(&k_name, device)?;
+
+    let mut k_proj = LinearConfig::new(config.hidden_size, kv_dim)
+        .with_bias(false)
+        .init(device);
+    k_proj.weight = Param::from_tensor(k_weight.clone());
+
+    let v_proj = if file.contains(&v_name) {
+        load_linear(file, &v_name, config.hidden_size, kv_dim, device)?
+    } else {
+        // Tie V to K
+        let mut v = LinearConfig::new(config.hidden_size, kv_dim)
+            .with_bias(false)
+            .init(device);
+        v.weight = Param::from_tensor(k_weight);
+        v
+    };
+
+    let o_proj = load_linear(file, &o_name, q_dim, config.hidden_size, device)?;
 
     Ok(Gemma4Attention {
-        q_proj: load_linear(
-            file,
-            &format!("blk.{idx}.attn_q.weight"),
-            config.hidden_size,
-            q_dim,
-            device,
-        )?,
-        k_proj: load_linear(
-            file,
-            &format!("blk.{idx}.attn_k.weight"),
-            config.hidden_size,
-            kv_dim,
-            device,
-        )?,
-        v_proj: load_linear(
-            file,
-            &format!("blk.{idx}.attn_v.weight"),
-            config.hidden_size,
-            kv_dim,
-            device,
-        )?,
-        o_proj: load_linear(
-            file,
-            &format!("blk.{idx}.attn_output.weight"),
-            q_dim,
-            config.hidden_size,
-            device,
-        )?,
-        num_heads: config.num_heads,
-        num_kv_heads: config.num_kv_heads,
-        head_dim: config.head_dim,
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
+        num_heads,
+        num_kv_heads,
+        head_dim,
     })
 }
 
@@ -405,12 +431,6 @@ fn load_moe<B: Backend>(
         // Load fused expert tensors and split per-expert
         let gate_up_all: Tensor<B, 3> = file.load_f32(&gate_up_name, device)?;
         let down_all: Tensor<B, 3> = file.load_f32(&down_name, device)?;
-
-        eprintln!(
-            "  gate_up_exps shape: {:?}, down_exps shape: {:?}",
-            gate_up_all.dims(),
-            down_all.dims()
-        );
 
         let mut experts = Vec::with_capacity(config.num_experts);
         for e in 0..config.num_experts {
