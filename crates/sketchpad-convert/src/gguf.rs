@@ -22,6 +22,8 @@ const GGML_TYPE_Q4_1: u32 = 3;
 const GGML_TYPE_Q5_0: u32 = 6;
 const GGML_TYPE_Q5_1: u32 = 7;
 const GGML_TYPE_Q8_0: u32 = 8;
+const GGML_TYPE_Q2_K: u32 = 10;
+const GGML_TYPE_Q3_K: u32 = 11;
 const GGML_TYPE_Q4_K: u32 = 12;
 const GGML_TYPE_Q5_K: u32 = 13;
 const GGML_TYPE_Q6_K: u32 = 14;
@@ -66,6 +68,8 @@ pub enum GgmlType {
     Q5_0,
     Q5_1,
     Q8_0,
+    Q2K,
+    Q3K,
     Q4K,
     Q5K,
     Q6K,
@@ -81,6 +85,8 @@ impl GgmlType {
             GGML_TYPE_Q5_0 => Ok(Self::Q5_0),
             GGML_TYPE_Q5_1 => Ok(Self::Q5_1),
             GGML_TYPE_Q8_0 => Ok(Self::Q8_0),
+            GGML_TYPE_Q2_K => Ok(Self::Q2K),
+            GGML_TYPE_Q3_K => Ok(Self::Q3K),
             GGML_TYPE_Q4_K => Ok(Self::Q4K),
             GGML_TYPE_Q5_K => Ok(Self::Q5K),
             GGML_TYPE_Q6_K => Ok(Self::Q6K),
@@ -98,7 +104,7 @@ impl GgmlType {
         match self {
             Self::F32 | Self::F16 => 1,
             Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 => 32,
-            Self::Q4K | Self::Q5K | Self::Q6K => 256,
+            Self::Q2K | Self::Q3K | Self::Q4K | Self::Q5K | Self::Q6K => 256,
         }
     }
 
@@ -114,6 +120,8 @@ impl GgmlType {
             Self::Q8_0 => 2 + 32,               // f16 scale + 32 x i8
             Self::Q4K => 2 + 2 + 12 + 128,      // f16 d + f16 dmin + scales + quants = 144
             Self::Q5K => 2 + 2 + 12 + 128 + 32, // f16 d + f16 dmin + scales + ql + qh = 176
+            Self::Q2K => 16 + 64 + 2 + 2,       // scales + quants + f16 d + f16 dmin = 84
+            Self::Q3K => 32 + 64 + 12 + 2,      // hmask + qs + scales + f16 d = 110
             Self::Q6K => 128 + 64 + 16 + 2,     // ql + qh + scales + f16 d = 210
         }
     }
@@ -544,6 +552,8 @@ pub fn dequantize(
         GgmlType::Q4_1 => dequantize_q4_1(data, &mut output),
         GgmlType::Q5_0 => dequantize_q5_0(data, &mut output),
         GgmlType::Q5_1 => dequantize_q5_1(data, &mut output),
+        GgmlType::Q2K => dequantize_q2_k(data, &mut output),
+        GgmlType::Q3K => dequantize_q3_k(data, &mut output),
         GgmlType::Q4K => dequantize_q4_k(data, &mut output),
         GgmlType::Q5K => dequantize_q5_k(data, &mut output),
         GgmlType::Q6K => dequantize_q6_k(data, &mut output),
@@ -648,6 +658,89 @@ fn dequantize_q5_1(data: &[u8], output: &mut [f32]) {
             let hi_h = (qh >> (i + 16)) & 1;
             out[i] = scale * (lo_4 | (lo_h << 4)) as f32 + min;
             out[i + 16] = scale * (hi_4 | (hi_h << 4)) as f32 + min;
+        }
+    }
+}
+
+/// Q2_K: super-block of 256 values
+/// Layout: 16 bytes scales (4-bit scale + 4-bit min packed) + 64 bytes quants (2-bit each) + f16 d + f16 dmin
+fn dequantize_q2_k(data: &[u8], output: &mut [f32]) {
+    const BLOCK_SIZE: usize = 84;
+
+    for (block_idx, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+        let scales_buf = &block[0..16];
+        let quants = &block[16..80];
+        let d = read_f16(block, 80);
+        let dmin = read_f16(block, 82);
+        let out = &mut output[block_idx * 256..(block_idx + 1) * 256];
+
+        for i in 0..256 {
+            let ib = i / 16; // which 16-element sub-block (0..15)
+            let scale_nibble = (scales_buf[ib] & 0x0F) as f32;
+            let min_nibble = ((scales_buf[ib] >> 4) & 0x0F) as f32;
+            let q = ((quants[i / 4] >> (2 * (i % 4))) & 0x3) as f32;
+            out[i] = d * scale_nibble * q - dmin * min_nibble;
+        }
+    }
+}
+
+/// Q3_K: super-block of 256 values
+/// Layout: 32 bytes hmask + 64 bytes qs (lower 2 bits) + 12 bytes scales (6-bit packed) + f16 d
+fn dequantize_q3_k(data: &[u8], output: &mut [f32]) {
+    const BLOCK_SIZE: usize = 110;
+
+    for (block_idx, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+        let hmask = &block[0..32];
+        let qs = &block[32..96];
+        let scales_raw = &block[96..108];
+        let d = read_f16(block, 108);
+        let out = &mut output[block_idx * 256..(block_idx + 1) * 256];
+
+        // Decode 16 x 6-bit scales from 12 bytes using the llama.cpp packing.
+        // The 12 bytes are split into two groups of 8 (indices 0..8). Each group
+        // yields 8 scales via two 32-bit words: lower 6 bits from bytes 0..4, and
+        // the next 6 bits (shifted >> 6) from bytes 0..4 again (masked differently).
+        let utmp: [u32; 4] = [
+            (scales_raw[0] as u32
+                | ((scales_raw[1] as u32) << 8)
+                | ((scales_raw[2] as u32) << 16)
+                | ((scales_raw[3] as u32) << 24))
+                & 0x3f3f3f3f,
+            (scales_raw[4] as u32
+                | ((scales_raw[5] as u32) << 8)
+                | ((scales_raw[6] as u32) << 16)
+                | ((scales_raw[7] as u32) << 24))
+                & 0x3f3f3f3f,
+            ((scales_raw[0] as u32
+                | ((scales_raw[1] as u32) << 8)
+                | ((scales_raw[2] as u32) << 16)
+                | ((scales_raw[3] as u32) << 24))
+                >> 6)
+                & 0x3f3f3f3f,
+            ((scales_raw[4] as u32
+                | ((scales_raw[5] as u32) << 8)
+                | ((scales_raw[6] as u32) << 16)
+                | ((scales_raw[7] as u32) << 24))
+                >> 6)
+                & 0x3f3f3f3f,
+        ];
+
+        // Extract the 16 6-bit scales (each byte of utmp[i] holds one scale).
+        let mut scales = [0i32; 16];
+        for i in 0..4 {
+            for byte_idx in 0..4 {
+                let raw = ((utmp[i] >> (byte_idx * 8)) & 0xFF) as i32;
+                scales[i * 4 + byte_idx] = raw - 32;
+            }
+        }
+
+        for i in 0..256 {
+            let low2 = (qs[i / 4] >> (2 * (i % 4))) & 0x3;
+            let hbit = (hmask[i / 8] >> (i % 8)) & 1;
+            let raw_quant = (low2 as i32 | ((hbit as i32) << 2)) - 4;
+            let is = i / 16; // scale index (0..15)
+            let scale = scales[is] as f32;
+            out[i] = d * scale * raw_quant as f32;
         }
     }
 }
