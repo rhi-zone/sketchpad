@@ -16,6 +16,7 @@ sketchpad-convert = { path = "../sketchpad-convert" }
 burn = { workspace = true }
 thiserror = { workspace = true }
 tokenizers = "0.21"
+ahash = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

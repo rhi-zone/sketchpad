@@ -64,6 +64,7 @@ pub mod gemma4;
 pub mod gemma4_gguf_loader;
 pub mod gemma4_loader;
 pub mod gemma_loader;
+pub mod gguf_tokenizer;
 pub mod jamba;
 pub mod jamba_loader;
 pub mod llama;

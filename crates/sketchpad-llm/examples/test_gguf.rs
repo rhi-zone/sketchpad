@@ -1,70 +1,97 @@
-//! Quick smoke test for GGUF Gemma 4 loading
+//! Gemma 4 GGUF text generation
 //!
-//! Usage: cargo run --example test_gguf -- <path-to-gguf> <path-to-tokenizer.json> [prompt]
+//! Tokenizer and chat template are loaded directly from the GGUF file —
+//! no separate tokenizer.json needed.
+//!
+//! Usage:
+//!   # Raw completion:
+//!   cargo run --example test_gguf -- <gguf-path> "Your prompt" [max-tokens]
+//!
+//!   # Instruct mode (wraps prompt in Gemma IT chat template):
+//!   cargo run --example test_gguf -- <gguf-path> --instruct "Your question" [max-tokens]
 
 use burn::prelude::*;
 use burn_ndarray::NdArray;
 use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf;
-use tokenizers::Tokenizer;
+use sketchpad_llm::gguf_tokenizer;
+use sketchpad_llm::sampling::SamplerConfig;
 
 type B = NdArray<f32>;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: {} <gguf-path> <tokenizer-path> [prompt]", args[0]);
+        eprintln!(
+            "Usage: {} <gguf-path> [--instruct] <prompt> [max-tokens]",
+            args[0]
+        );
         std::process::exit(1);
     }
 
     let gguf_path = &args[1];
-    let tokenizer_path = &args[2];
-    let prompt = if args.len() > 3 {
-        args[3].as_str()
+
+    // Parse --instruct flag and remaining args
+    let (instruct, prompt, max_tokens) = if args.get(2).map(|s| s.as_str()) == Some("--instruct") {
+        let prompt = args.get(3).map(|s| s.as_str()).unwrap_or("Hello!");
+        let max_tokens = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(256usize);
+        (true, prompt, max_tokens)
     } else {
-        "Hello! I am a language model and"
+        let prompt = args[2].as_str();
+        let max_tokens = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(128usize);
+        (false, prompt, max_tokens)
     };
+
     let device = <B as Backend>::Device::default();
 
     eprintln!("Loading model from {gguf_path}...");
     let start = std::time::Instant::now();
-
-    let (model, runtime, config) =
+    let (model, runtime, _config) =
         load_gemma4_gguf::<B, _>(gguf_path, &device).expect("Failed to load model");
-
     eprintln!("Model loaded in {:.1}s", start.elapsed().as_secs_f64());
 
-    let tokenizer = Tokenizer::from_file(tokenizer_path).expect("Failed to load tokenizer");
-    let encoding = tokenizer.encode(prompt, false).expect("Failed to encode");
-    let token_ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
-    eprintln!("Prompt: {:?}", prompt);
-    eprintln!("Token IDs: {:?}", token_ids);
+    // Load tokenizer from the GGUF file directly — no external tokenizer.json needed
+    let file = sketchpad_convert::gguf::GgufFile::open(gguf_path).expect("Failed to reopen GGUF");
+    let tokenizer = gguf_tokenizer::load_tokenizer(&file).expect("Failed to load tokenizer");
 
+    // Format prompt: raw or wrapped in Gemma IT chat template
+    let formatted = if instruct {
+        gguf_tokenizer::format_gemma_prompt(prompt)
+    } else {
+        prompt.to_string()
+    };
+
+    let encoding = tokenizer
+        .encode(formatted.as_str(), false)
+        .expect("Failed to encode");
+    let token_ids: Vec<i32> = encoding.get_ids().iter().map(|&id| id as i32).collect();
     let seq_len = token_ids.len();
+
+    eprintln!("Prompt ({seq_len} tokens)");
+
     let data = TensorData::new(token_ids, [1, seq_len]);
     let input_ids = Tensor::<B, 2, Int>::from_data(data, &device);
 
-    eprintln!("Running forward pass...");
-    let fwd_start = std::time::Instant::now();
+    eprintln!("Generating up to {max_tokens} tokens...");
+    let gen_start = std::time::Instant::now();
 
-    let output = model.forward(input_ids, &runtime, None);
+    let sampler = SamplerConfig {
+        temperature: 0.7,
+        top_p: 0.9,
+        ..SamplerConfig::greedy()
+    };
+    let output_ids = model.generate(input_ids, &runtime, max_tokens, &sampler);
+    eprintln!("Generated in {:.1}s", gen_start.elapsed().as_secs_f64());
 
-    eprintln!("Forward pass in {:.1}s", fwd_start.elapsed().as_secs_f64());
+    // Decode the newly generated tokens (skip the prompt)
+    let all_ids: Vec<i32> = output_ids.to_data().to_vec().unwrap();
+    let new_ids: Vec<u32> = all_ids[seq_len..].iter().map(|&id| id as u32).collect();
+    let generated = tokenizer
+        .decode(&new_ids, true)
+        .unwrap_or_else(|e| format!("<decode error: {e}>"));
 
-    // Print top-5 tokens at the last position
-    let logit_vals: Vec<f32> = output
-        .logits
-        .reshape([seq_len, config.vocab_size])
-        .to_data()
-        .to_vec()
-        .unwrap();
-    let last: Vec<f32> = logit_vals[(seq_len - 1) * config.vocab_size..].to_vec();
-    let mut indexed: Vec<(usize, f32)> = last.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    eprintln!("Top-5 predictions at last position:");
-    for (token_id, logit) in indexed.iter().take(5) {
-        let text = tokenizer
-            .decode(&[*token_id as u32], false)
-            .unwrap_or_else(|_| format!("<{token_id}>"));
-        eprintln!("  {token_id:6}  {logit:8.3}  {:?}", text);
+    if instruct {
+        println!("{generated}");
+    } else {
+        println!("{prompt}{generated}");
     }
 }
