@@ -23,6 +23,7 @@ serde_json = "1.0"
 # Optional serve dependencies
 axum = { version = "0.7", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
+minijinja = "2.19.0"
 
 [dev-dependencies]
 burn-ndarray = { workspace = true }

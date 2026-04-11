@@ -13,7 +13,7 @@
 use burn::prelude::*;
 use burn_ndarray::NdArray;
 use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf;
-use sketchpad_llm::gguf_tokenizer;
+use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
 use sketchpad_llm::sampling::SamplerConfig;
 
 type B = NdArray<f32>;
@@ -53,9 +53,11 @@ fn main() {
     let file = sketchpad_convert::gguf::GgufFile::open(gguf_path).expect("Failed to reopen GGUF");
     let tokenizer = gguf_tokenizer::load_tokenizer(&file).expect("Failed to load tokenizer");
 
-    // Format prompt: raw or wrapped in Gemma IT chat template
+    // Format prompt: raw or wrapped in the model's own chat template (from GGUF metadata)
     let formatted = if instruct {
-        gguf_tokenizer::format_gemma_prompt(prompt)
+        let msgs = [ChatMessage::user(prompt)];
+        gguf_tokenizer::apply_chat_template(&file, &msgs, true)
+            .expect("Failed to apply chat template")
     } else {
         prompt.to_string()
     };

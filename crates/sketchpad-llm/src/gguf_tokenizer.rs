@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use ahash::AHashMap;
-
+use minijinja::Environment;
 use sketchpad_convert::gguf::{GgufFile, MetadataValue};
 use tokenizers::{
     AddedToken, Tokenizer,
@@ -36,25 +36,20 @@ impl std::error::Error for GgufTokenizerError {}
 pub fn load_tokenizer(file: &GgufFile) -> Result<Tokenizer, GgufTokenizerError> {
     let meta = file.metadata();
 
-    // Token strings — one per vocabulary entry, indexed by token ID
     let tokens = string_array(meta, "tokenizer.ggml.tokens")
         .ok_or_else(|| GgufTokenizerError("missing tokenizer.ggml.tokens".into()))?;
 
-    // Token types: 0=normal, 1=unknown, 2=unused, 3=control/special, 6=byte
     let token_types =
         u32_array(meta, "tokenizer.ggml.token_type").unwrap_or_else(|| vec![0u32; tokens.len()]);
 
-    // BPE merge rules (may be absent for pure unigram models, but present for Gemma)
     let merge_strs = string_array(meta, "tokenizer.ggml.merges").unwrap_or_default();
 
-    // Build vocab map: token string → id (AHashMap required by tokenizers crate)
     let vocab: AHashMap<String, u32> = tokens
         .iter()
         .enumerate()
         .map(|(i, t)| (t.clone(), i as u32))
         .collect();
 
-    // Parse merge rules: "A B" → ("A", "B")
     let merges: Vec<(String, String)> = merge_strs
         .iter()
         .filter_map(|m| {
@@ -73,8 +68,6 @@ pub fn load_tokenizer(file: &GgufFile) -> Result<Tokenizer, GgufTokenizerError> 
 
     let mut tokenizer = Tokenizer::new(bpe);
 
-    // SentencePiece-style tokenizers use a leading `▁` to mark word boundaries.
-    // `PrependScheme::Always` prepends it before the very first token of a sequence.
     tokenizer.with_pre_tokenizer(Some(Metaspace::new('▁', PrependScheme::Always, true)));
     tokenizer.with_decoder(Some(MetaspaceDecoder::new(
         '▁',
@@ -82,8 +75,7 @@ pub fn load_tokenizer(file: &GgufFile) -> Result<Tokenizer, GgufTokenizerError> 
         true,
     )));
 
-    // Register control/special tokens (token_type == 3) as AddedTokens so the
-    // tokenizer never tries to BPE-split them.
+    // Register control/special tokens so they are never BPE-split
     let special: Vec<AddedToken> = tokens
         .iter()
         .zip(token_types.iter())
@@ -95,36 +87,88 @@ pub fn load_tokenizer(file: &GgufFile) -> Result<Tokenizer, GgufTokenizerError> 
     Ok(tokenizer)
 }
 
-/// Read the Jinja2 chat template stored in GGUF metadata, if present.
-pub fn chat_template(file: &GgufFile) -> Option<String> {
+/// A chat message: role (`"user"`, `"model"`, `"system"`) and content.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+impl ChatMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
+    }
+
+    pub fn model(content: impl Into<String>) -> Self {
+        Self {
+            role: "model".into(),
+            content: content.into(),
+        }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Apply the model's chat template (read from GGUF) to format a conversation.
+///
+/// The template is evaluated with [minijinja] using the same context that
+/// HuggingFace's `apply_chat_template` provides: `messages`, `bos_token`,
+/// `eos_token`, and `add_generation_prompt`.
+///
+/// Call with `add_generation_prompt = true` to append the model turn opener,
+/// making the output ready for the model to continue.
+pub fn apply_chat_template(
+    file: &GgufFile,
+    messages: &[ChatMessage],
+    add_generation_prompt: bool,
+) -> Result<String, GgufTokenizerError> {
+    let template_str = raw_chat_template(file)
+        .ok_or_else(|| GgufTokenizerError("no chat_template in GGUF metadata".into()))?;
+
+    // Resolve BOS/EOS token strings from the vocabulary
+    let tokens = string_array(file.metadata(), "tokenizer.ggml.tokens").unwrap_or_default();
+    let bos_id = scalar_u32(file.metadata(), "tokenizer.ggml.bos_token_id").unwrap_or(2) as usize;
+    let eos_id = scalar_u32(file.metadata(), "tokenizer.ggml.eos_token_id").unwrap_or(1) as usize;
+    let bos_token = tokens
+        .get(bos_id)
+        .cloned()
+        .unwrap_or_else(|| "<bos>".into());
+    let eos_token = tokens
+        .get(eos_id)
+        .cloned()
+        .unwrap_or_else(|| "<eos>".into());
+
+    let messages_val = minijinja::Value::from_serialize(messages);
+
+    let mut env = Environment::new();
+    env.add_template("chat", &template_str)
+        .map_err(|e| GgufTokenizerError(format!("chat template parse error: {e}")))?;
+
+    env.get_template("chat")
+        .unwrap()
+        .render(minijinja::context! {
+            messages => messages_val,
+            bos_token => bos_token,
+            eos_token => eos_token,
+            add_generation_prompt => add_generation_prompt,
+        })
+        .map_err(|e| GgufTokenizerError(format!("chat template render error: {e}")))
+}
+
+/// Return the raw Jinja2 chat template string from GGUF metadata, if present.
+pub fn raw_chat_template(file: &GgufFile) -> Option<String> {
     match file.metadata().get("tokenizer.chat_template") {
         Some(MetadataValue::String(s)) => Some(s.clone()),
         _ => None,
     }
-}
-
-/// Format a single-turn user prompt in Gemma IT chat format.
-///
-/// Produces: `<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n`
-///
-/// For multi-turn or system-prompt scenarios, use [`format_gemma_chat`].
-pub fn format_gemma_prompt(prompt: &str) -> String {
-    format!("<bos><start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n")
-}
-
-/// Format a multi-turn conversation in Gemma IT chat format.
-///
-/// Each message is `(role, content)` where role is `"user"`, `"model"`, or `"system"`.
-/// A generation prompt (`<start_of_turn>model\n`) is appended if `add_generation_prompt` is true.
-pub fn format_gemma_chat(messages: &[(&str, &str)], add_generation_prompt: bool) -> String {
-    let mut out = String::from("<bos>");
-    for (role, content) in messages {
-        out.push_str(&format!("<start_of_turn>{role}\n{content}<end_of_turn>\n"));
-    }
-    if add_generation_prompt {
-        out.push_str("<start_of_turn>model\n");
-    }
-    out
 }
 
 // --- helpers ---
@@ -155,6 +199,16 @@ fn u32_array(meta: &HashMap<String, MetadataValue>, key: &str) -> Option<Vec<u32
                 })
                 .collect(),
         ),
+        _ => None,
+    }
+}
+
+fn scalar_u32(meta: &HashMap<String, MetadataValue>, key: &str) -> Option<u32> {
+    match meta.get(key)? {
+        MetadataValue::U32(n) => Some(*n),
+        MetadataValue::I32(n) => Some(*n as u32),
+        MetadataValue::U64(n) => Some(*n as u32),
+        MetadataValue::U8(n) => Some(*n as u32),
         _ => None,
     }
 }
