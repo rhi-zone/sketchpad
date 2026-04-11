@@ -203,7 +203,7 @@ fn load_gemma4_layer<B: Backend>(
         device,
     )?;
 
-    let use_sliding_window = layer_idx % 2 == 0;
+    let use_sliding_window = attention.head_dim == config.head_dim;
 
     Ok(Gemma4Layer {
         attention,

@@ -140,7 +140,9 @@ impl Gemma4Config {
                     num_kv_heads: self.num_kv_heads,
                     head_dim: self.head_dim,
                     norm_eps: self.norm_eps,
-                    use_sliding_window: i % 2 == 0,
+                    // Local attention has the config's default head_dim; global layers are larger.
+                    // For the programmatic init path (testing), use head_dim from config as local.
+                    use_sliding_window: true,
                     is_moe,
                     num_experts: self.num_experts,
                     num_shared_experts: self.num_shared_experts,

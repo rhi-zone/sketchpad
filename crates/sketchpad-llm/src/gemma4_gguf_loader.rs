@@ -297,7 +297,9 @@ fn load_layer<B: Backend>(
         device,
     )?;
 
-    let use_sliding_window = idx % 2 == 0;
+    // Global attention layers have a larger head_dim (e.g. 512 vs 256 for local).
+    // Infer from the loaded attention rather than hardcoding a layer-index pattern.
+    let use_sliding_window = attention.head_dim == config.head_dim;
 
     Ok(Gemma4Layer {
         attention,
