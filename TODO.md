@@ -366,9 +366,24 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 - [x] **GPU-side quantized matmul** (strategy 3, kernels): Q8_0 and Q4_K dequantization kernels
   in `sketchpad-cubecl::quantized_matmul`. `GpuQuantizedLinear<R>` wraps packed i32 tensor in
   VRAM, dequantizes per forward. Works on WGPU/CUDA/CPU via CubeCL backend dispatch.
-- [ ] **Wire GPU quantized linear into Gemma 4 inference**: `load_gemma4_gguf_gpu_quant` loader
+- [x] **Wire GPU quantized linear into Gemma 4 inference**: `load_gemma4_gguf_gpu_quant` loader
   variant that uploads weight bytes as `GpuQuantizedLinear<R>` instead of dequantizing to f16
-  on load. Requires CubeRuntime-aware loader and a GPU-quant path in the forward pass.
+  on load. VRAM-aware dispatch via `--vram GB` CLI flag.
+
+#### GGUF Quantization Coverage Gaps
+- [ ] **Missing GgmlType variants**: Q2_K (type 10), Q3_K (type 11) — used in Q3_K_S/M/L model
+  filenames (S/M/L = layer mix, not a separate type). IQ types: IQ2_XXS (16), IQ2_XS (17),
+  IQ3_XXS (18), IQ1_S (19), IQ4_NL (20), IQ3_S (21), IQ2_S (22), IQ4_XS (23), IQ1_M (29).
+  Currently `GgufFile::open()` returns `UnsupportedQuantType` error for any of these.
+- [ ] **CPU dequant for Q2_K**: 84 bytes/block of 256 elements. Block layout: 16-byte scales,
+  64-byte 2-bit quants, f16 d, f16 dmin.
+- [ ] **CPU dequant for Q3_K**: 110 bytes/block of 256 elements. Block layout: 32-byte high-bit
+  mask, 64-byte 2-bit lower quants, 12-byte scales, f16 d.
+- [ ] **CPU dequant for IQ4_XS and other IQ types**: lookup-table-based, more complex than K-quants.
+  Lower priority; Q2_K and Q3_K cover most practical models.
+- [ ] **GPU kernels for Q2_K, Q3_K**: extend `sketchpad-cubecl::quantized_matmul` with new
+  `GpuQuantType` variants and CubeCL kernel implementations. Medium work.
+- [ ] **GPU kernels for IQ types**: large work, low priority (IQ types are niche).
 
 ### Shared Building Blocks (burn-models-core)
 

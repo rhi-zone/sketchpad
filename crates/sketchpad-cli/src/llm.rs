@@ -146,6 +146,14 @@ pub enum LlmCommands {
         /// On CPU (ndarray), f32 is always used regardless.
         #[arg(long, value_enum, default_value = "f16")]
         precision: crate::Precision,
+
+        /// Available VRAM in gigabytes. Used to select the best loading strategy.
+        /// f16 model fits: standard load (dequant at load time, fastest inference).
+        /// Only quantized bytes fit: GPU-quantized (bytes stay in VRAM, dequant per forward pass).
+        /// Neither fits: CPU-offloaded (quantized bytes in RAM, dequant on CPU).
+        /// Without this flag, quantized GGUFs default to GPU-quantized on GPU backends.
+        #[arg(long, value_name = "GB")]
+        vram: Option<f32>,
     },
 
     /// Start an OpenAI-compatible HTTP server
@@ -253,18 +261,42 @@ pub fn run_chat<B: Backend>(
 
 type TokenDecoder = Box<dyn Fn(&[u32]) -> String>;
 
+/// Shared inference parameters for GGUF runs.
+pub struct GgufRunParams {
+    pub weights: PathBuf,
+    pub prompt: String,
+    pub max_tokens: usize,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub vram_gb: Option<f32>,
+}
+
+/// Loading strategy selected based on model size and available VRAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GgufLoadStrategy {
+    /// Dequantize all weights to f16/bf16 at load time (fastest inference, most VRAM).
+    Standard,
+    /// Keep quantized bytes in VRAM, dequantize per forward pass (GPU quant supported types only).
+    GpuQuant,
+    /// Keep quantized bytes in RAM, dequantize on CPU per forward pass (least VRAM).
+    CpuOffload,
+}
+
 struct GgufInput {
     arch: String,
-    /// Whether the projection weights are quantized (non-F16/F32).
-    /// Used to decide between offloaded and standard loading on CPU.
-    is_quantized: bool,
+    strategy: GgufLoadStrategy,
     /// Decodes a slice of token IDs to a string (wraps tokenizer::decode).
     decode: TokenDecoder,
     seq_len: usize,
     token_ids: Vec<i32>,
 }
 
-fn load_gguf_input(path: &str, prompt: &str) -> Result<GgufInput> {
+fn load_gguf_input(
+    path: &str,
+    prompt: &str,
+    vram_gb: Option<f32>,
+    gpu_quant_available: bool,
+) -> Result<GgufInput> {
     let file = GgufFile::open(path).context("Failed to open GGUF")?;
 
     let arch = match file.metadata().get("general.architecture") {
@@ -272,9 +304,41 @@ fn load_gguf_input(path: &str, prompt: &str) -> Result<GgufInput> {
         _ => "gemma4".to_string(),
     };
 
+    let is_gpu_quant_type = file
+        .tensor_info("blk.0.attn_q.weight")
+        .is_some_and(|info| info.ggml_type.is_gpu_quant_supported());
+
     let is_quantized = file
         .tensor_info("blk.0.attn_q.weight")
         .is_some_and(|info| !matches!(info.ggml_type, GgmlType::F32 | GgmlType::F16));
+
+    let strategy = if let Some(vram) = vram_gb {
+        // 85% of user-reported VRAM as budget; remainder reserved for KV cache + activations
+        let budget = (vram * 1024.0 * 1024.0 * 1024.0 * 0.85) as u64;
+        let (f16_bytes, quant_bytes) = file.estimated_vram_bytes();
+        eprintln!(
+            "Model size: {:.1} GB f16, {:.1} GB quantized  (budget: {:.1} GB)",
+            f16_bytes as f64 / 1e9,
+            quant_bytes as f64 / 1e9,
+            budget as f64 / 1e9,
+        );
+        if f16_bytes <= budget {
+            GgufLoadStrategy::Standard
+        } else if gpu_quant_available && is_gpu_quant_type && quant_bytes <= budget {
+            GgufLoadStrategy::GpuQuant
+        } else {
+            GgufLoadStrategy::CpuOffload
+        }
+    } else {
+        // No VRAM hint: default heuristic
+        if gpu_quant_available && is_gpu_quant_type {
+            GgufLoadStrategy::GpuQuant
+        } else if is_quantized {
+            GgufLoadStrategy::CpuOffload
+        } else {
+            GgufLoadStrategy::Standard
+        }
+    };
 
     let formatted = if gguf_tokenizer::raw_chat_template(&file).is_some() {
         let msgs = [ChatMessage::user(prompt)];
@@ -299,28 +363,26 @@ fn load_gguf_input(path: &str, prompt: &str) -> Result<GgufInput> {
 
     Ok(GgufInput {
         arch,
-        is_quantized,
+        strategy,
         decode,
         seq_len,
         token_ids,
     })
 }
 
-/// Run inference on a GGUF model file, auto-detecting architecture and offload strategy.
-///
-/// Quantized GGUFs (Q4K/Q8_0) automatically use CPU-offloaded loading to keep weights
-/// as quantized bytes in RAM. Non-quantized GGUFs are loaded normally.
-/// For GPU-side quantized matmul, `run_gguf_gpu_quant` is used instead (dispatched by the CLI).
-pub fn run_gguf<B: Backend>(
-    weights: PathBuf,
-    prompt: String,
-    max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
-    device: &B::Device,
-) -> Result<()> {
+/// Run inference on a GGUF model file (standard load or CPU-offload path).
+/// GPU-quant strategy is dispatched separately via `run_gguf_gpu_quant`.
+pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result<()> {
+    let GgufRunParams {
+        weights,
+        prompt,
+        max_tokens,
+        temperature,
+        top_p,
+        vram_gb,
+    } = params;
     let path = weights.to_str().context("Invalid path")?;
-    let input = load_gguf_input(path, &prompt)?;
+    let input = load_gguf_input(path, &prompt, vram_gb, false)?;
     eprintln!(
         "Architecture: {}  Prompt: {} tokens",
         input.arch, input.seq_len
@@ -349,14 +411,11 @@ pub fn run_gguf<B: Backend>(
             all
         }
         _ => {
-            let label = if input.is_quantized {
-                " (CPU offload)"
-            } else {
-                ""
-            };
+            let offload = input.strategy == GgufLoadStrategy::CpuOffload;
+            let label = if offload { " (CPU offload)" } else { "" };
             eprintln!("Loading Gemma 4{label}...");
             let start = std::time::Instant::now();
-            let (model, runtime, _) = if input.is_quantized {
+            let (model, runtime, _) = if offload {
                 load_gemma4_gguf_offloaded::<B, _>(path, device)
                     .context("Failed to load Gemma 4 (offloaded)")?
             } else {
@@ -397,11 +456,7 @@ pub fn run_gguf<B: Backend>(
 /// at the cost of per-token dequantization on the GPU.
 #[cfg(feature = "cubecl")]
 pub fn run_gguf_gpu_quant<R, F, I, BT>(
-    weights: PathBuf,
-    prompt: String,
-    max_tokens: usize,
-    temperature: f32,
-    top_p: f32,
+    params: GgufRunParams,
     dtype: burn::tensor::DType,
     device: &R::Device,
 ) -> Result<()>
@@ -414,8 +469,13 @@ where
     use burn_cubecl::CubeBackend;
     use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf_gpu_quant;
 
-    let path = weights.to_str().context("Invalid path")?;
-    let input = load_gguf_input(path, &prompt)?;
+    let path = params.weights.to_str().context("Invalid path")?;
+    let input = load_gguf_input(path, &params.prompt, params.vram_gb, true)?;
+
+    // If VRAM hint says standard load or CPU offload is better, delegate to run_gguf
+    if input.strategy != GgufLoadStrategy::GpuQuant {
+        return run_gguf::<CubeBackend<R, F, I, BT>>(params, device);
+    }
     eprintln!(
         "Architecture: {}  Prompt: {} tokens",
         input.arch, input.seq_len
@@ -433,12 +493,12 @@ where
     eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
 
     let sampler = SamplerConfig {
-        temperature,
-        top_p,
+        temperature: params.temperature,
+        top_p: params.top_p,
         ..SamplerConfig::greedy()
     };
     let t = std::time::Instant::now();
-    let out = model.generate(input_ids, &runtime, max_tokens, &sampler);
+    let out = model.generate(input_ids, &runtime, params.max_tokens, &sampler);
     let elapsed = t.elapsed().as_secs_f64();
     let all: Vec<i32> = out.to_data().to_vec().unwrap();
     let n = all.len() - input.seq_len;

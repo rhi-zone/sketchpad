@@ -416,6 +416,25 @@ impl GgufFile {
         Ok((data, info))
     }
 
+    /// Estimate VRAM bytes needed under two loading strategies.
+    ///
+    /// `as_f16`: total bytes if all tensors are dequantized to f16 (standard load).
+    /// `as_quantized`: total raw bytes if quantized tensors stay quantized (GPU quant / CPU offload).
+    ///
+    /// These are weight-only estimates; add ~10–20% headroom for KV cache and activations.
+    pub fn estimated_vram_bytes(&self) -> (u64, u64) {
+        let mut as_f16: u64 = 0;
+        let mut as_quantized: u64 = 0;
+        for info in self.tensors.values() {
+            let n_elements: u64 = info.shape.iter().map(|&d| d as u64).product();
+            let n_blocks = n_elements / info.ggml_type.block_size() as u64;
+            let raw_bytes = n_blocks * info.ggml_type.type_size() as u64;
+            as_quantized += raw_bytes;
+            as_f16 += n_elements * 2; // f16 = 2 bytes/element
+        }
+        (as_f16, as_quantized)
+    }
+
     /// Return an Arc clone of the memory-mapped file, for zero-copy sharing.
     pub fn mmap_arc(&self) -> Arc<memmap2::Mmap> {
         Arc::clone(&self.mmap)
