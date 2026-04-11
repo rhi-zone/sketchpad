@@ -153,6 +153,11 @@ pub enum LlmCommands {
         /// Without this flag, quantized GGUFs default to GPU-quantized on GPU backends.
         #[arg(long, value_name = "GB")]
         vram: Option<f32>,
+
+        /// Enable KV cache compression using PolarQuant (~4x reduction).
+        /// Reduces VRAM usage for long contexts at slight quality cost.
+        #[arg(long)]
+        kv_quant: bool,
     },
 
     /// Start an OpenAI-compatible HTTP server
@@ -268,6 +273,9 @@ pub struct GgufRunParams {
     pub temperature: f32,
     pub top_p: f32,
     pub vram_gb: Option<f32>,
+    /// KV cache compression ratio for VRAM budget estimation.
+    /// `1.0` = no compression; `0.25` = PolarQuant 4-bit (~4x reduction).
+    pub kv_quant_ratio: f64,
 }
 
 /// Loading strategy selected based on model size and available VRAM.
@@ -295,6 +303,8 @@ fn load_gguf_input(
     prompt: &str,
     vram_gb: Option<f32>,
     gpu_quant_available: bool,
+    max_tokens: usize,
+    kv_quant_ratio: f64,
 ) -> Result<GgufInput> {
     let file = GgufFile::open(path).context("Failed to open GGUF")?;
 
@@ -303,29 +313,57 @@ fn load_gguf_input(
         _ => "gemma4".to_string(),
     };
 
+    // Determine context length for KV cache estimation: use max_tokens if explicitly set
+    // (non-default), otherwise fall back to llm.context_length from metadata, then 4096.
+    let context_len = {
+        let meta_context = match file.metadata().get("llm.context_length") {
+            Some(MetadataValue::U64(v)) => Some(*v as usize),
+            Some(MetadataValue::U32(v)) => Some(*v as usize),
+            _ => None,
+        };
+        meta_context.unwrap_or(4096).min(max_tokens)
+    };
+
     let vram_budget = vram_gb.map(|gb| (gb * 0.85 * 1024.0 * 1024.0 * 1024.0) as u64);
     let (f16_bytes, quantized_bytes) = file.estimated_vram_bytes();
+    let kv_bytes = file.estimated_kv_cache_bytes(context_len).unwrap_or(0);
+    let effective_kv = (kv_bytes as f64 * kv_quant_ratio) as u64;
 
     if let Some(budget) = vram_budget {
         eprintln!(
-            "Model size: {:.1} GB f16, {:.1} GB quantized  (budget: {:.1} GB)",
+            "Model size: {:.1} GB f16, {:.1} GB quantized  (budget: {:.1} GB, KV cache: {:.1} GB at {} tokens)",
             f16_bytes as f64 / 1e9,
             quantized_bytes as f64 / 1e9,
             budget as f64 / 1e9,
+            kv_bytes as f64 / 1e9,
+            context_len,
         );
     }
+
+    let total_gpu_quant = quantized_bytes + effective_kv;
 
     // TODO: auto-detect VRAM via wgpu adapter when vram_budget is None
     let strategy = match vram_budget {
         Some(budget) => {
-            if quantized_bytes <= budget {
-                // Whole model fits as quantized bytes — use GPU quant (best of both worlds)
+            if total_gpu_quant <= budget {
+                // Whole model + KV cache fits — use GPU quant (best of both worlds)
                 if gpu_quant_available {
                     GgufLoadStrategy::GpuQuant
                 } else {
                     GgufLoadStrategy::Standard
                 }
             } else {
+                // Print a helpful warning if model weights fit but KV cache pushes it over
+                if quantized_bytes <= budget && kv_bytes > 0 {
+                    eprintln!(
+                        "Warning: model weights fit ({:.1} GB) but KV cache at {} tokens \
+                         adds {:.1} GB; consider --max-tokens {} or --kv-quant",
+                        quantized_bytes as f64 / 1e9,
+                        context_len,
+                        kv_bytes as f64 / 1e9,
+                        (budget - quantized_bytes) / (kv_bytes / context_len as u64),
+                    );
+                }
                 GgufLoadStrategy::CpuOffload
             }
         }
@@ -379,9 +417,10 @@ pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result
         temperature,
         top_p,
         vram_gb,
+        kv_quant_ratio,
     } = params;
     let path = weights.to_str().context("Invalid path")?;
-    let input = load_gguf_input(path, &prompt, vram_gb, false)?;
+    let input = load_gguf_input(path, &prompt, vram_gb, false, max_tokens, kv_quant_ratio)?;
     eprintln!(
         "Architecture: {}  Prompt: {} tokens",
         input.arch, input.seq_len
@@ -477,7 +516,14 @@ where
     use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf_gpu_quant;
 
     let path = params.weights.to_str().context("Invalid path")?;
-    let input = load_gguf_input(path, &params.prompt, params.vram_gb, true)?;
+    let input = load_gguf_input(
+        path,
+        &params.prompt,
+        params.vram_gb,
+        true,
+        params.max_tokens,
+        params.kv_quant_ratio,
+    )?;
 
     // If VRAM hint says standard load or CPU offload is better, delegate to run_gguf
     if input.strategy != GgufLoadStrategy::GpuQuant {

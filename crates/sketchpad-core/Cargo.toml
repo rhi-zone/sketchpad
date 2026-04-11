@@ -10,6 +10,7 @@ cubecl = ["dep:sketchpad-cubecl", "dep:burn-cubecl"]
 
 [dependencies]
 burn.workspace = true
+half.workspace = true
 sketchpad-cubecl = { workspace = true, optional = true }
 burn-cubecl = { workspace = true, optional = true }
 

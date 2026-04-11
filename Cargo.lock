@@ -5727,6 +5727,7 @@ dependencies = [
  "burn",
  "burn-cubecl",
  "burn-ndarray",
+ "half",
  "sketchpad-cubecl",
 ]
 

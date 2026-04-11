@@ -5,7 +5,10 @@
 //! attention over the entire sequence. With KV cache, we only compute
 //! attention for the new token against cached keys/values.
 
+use std::marker::PhantomData;
+
 use burn::prelude::*;
+use half::f16;
 
 /// Result of updating a cache layer with new K/V tensors
 pub struct CacheUpdate<B: Backend> {
@@ -281,6 +284,294 @@ impl<B: Backend> StaticKvCache<B> {
     /// Resets the cache position without reallocating
     pub fn reset(&mut self) {
         self.current_pos = 0;
+    }
+}
+
+/// Quantization method for compressed KV cache storage
+pub enum KvQuantMethod {
+    /// Full precision — no compression, equivalent to ModelKvCache
+    Full,
+    /// PolarQuant: magnitude (f16) + 4-bit direction quantization (~4x vs f16)
+    PolarQuant,
+}
+
+impl KvQuantMethod {
+    /// Ratio of compressed bytes to f16 bytes (used for VRAM estimation)
+    pub fn compression_ratio(&self, head_dim: usize) -> f64 {
+        match self {
+            Self::Full => 1.0,
+            Self::PolarQuant => (2.0 + head_dim as f64 / 2.0) / (head_dim as f64 * 2.0),
+        }
+    }
+}
+
+/// Per-layer storage for `CompressedKvCache`
+struct CompressedLayerCache {
+    k_bytes: Vec<u8>,
+    v_bytes: Vec<u8>,
+    batch: usize,
+    num_heads: usize,
+    head_dim: usize,
+    seq_len: usize,
+}
+
+impl CompressedLayerCache {
+    fn new() -> Self {
+        Self {
+            k_bytes: Vec::new(),
+            v_bytes: Vec::new(),
+            batch: 0,
+            num_heads: 0,
+            head_dim: 0,
+            seq_len: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.k_bytes.clear();
+        self.v_bytes.clear();
+        self.batch = 0;
+        self.num_heads = 0;
+        self.seq_len = 0;
+    }
+}
+
+/// KV cache that stores compressed key/value tensors on the CPU
+///
+/// Uses PolarQuant compression (~4x vs f16) or full f16 precision.
+/// Keys and values are compressed after each step and decompressed when
+/// returning the full sequence for attention computation.
+pub struct CompressedKvCache<B: Backend> {
+    layers: Vec<CompressedLayerCache>,
+    method: KvQuantMethod,
+    _phantom: PhantomData<B>,
+}
+
+impl<B: Backend> CompressedKvCache<B> {
+    /// Creates a new compressed KV cache
+    ///
+    /// # Arguments
+    ///
+    /// * `num_layers` - Number of transformer layers
+    /// * `num_heads` - Number of KV heads (informational, derived from tensors at runtime)
+    /// * `head_dim` - Dimension per head (informational, derived from tensors at runtime)
+    /// * `method` - Quantization method to use
+    pub fn new(
+        num_layers: usize,
+        _num_heads: usize,
+        _head_dim: usize,
+        method: KvQuantMethod,
+    ) -> Self {
+        let layers = (0..num_layers)
+            .map(|_| CompressedLayerCache::new())
+            .collect();
+        Self {
+            layers,
+            method,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// Compress a flat f32 array of vectors (row-major, each row = head_dim floats)
+/// using PolarQuant encoding: f16 magnitude + 4-bit packed direction.
+fn polar_quant_compress(data: &[f32], head_dim: usize) -> Vec<u8> {
+    let num_vecs = data.len() / head_dim;
+    // bytes per vector: 2 (f16 magnitude) + ceil(head_dim / 2) packed nibbles
+    let nibble_bytes = head_dim.div_ceil(2);
+    let bytes_per_vec = 2 + nibble_bytes;
+    let mut out = vec![0u8; num_vecs * bytes_per_vec];
+
+    for i in 0..num_vecs {
+        let row = &data[i * head_dim..(i + 1) * head_dim];
+        let base = i * bytes_per_vec;
+
+        // Compute magnitude
+        let mag: f32 = row.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+        // Store magnitude as f16 little-endian
+        let mag_f16 = f16::from_f32(mag);
+        let mag_bits = mag_f16.to_bits().to_le_bytes();
+        out[base] = mag_bits[0];
+        out[base + 1] = mag_bits[1];
+
+        if mag == 0.0 {
+            // Direction bytes already zero from vec initialisation
+            continue;
+        }
+
+        // Quantize direction components and pack as nibbles
+        let inv_mag = 1.0 / mag;
+        let nibble_base = base + 2;
+        for j in (0..head_dim).step_by(2) {
+            let d0 = row[j] * inv_mag;
+            let q0 = (d0 * 7.0).round().clamp(-7.0, 7.0) as i8;
+
+            let q1 = if j + 1 < head_dim {
+                let d1 = row[j + 1] * inv_mag;
+                (d1 * 7.0).round().clamp(-7.0, 7.0) as i8
+            } else {
+                0i8
+            };
+
+            // Pack: high nibble = q0, low nibble = q1 (4-bit two's complement)
+            let packed = ((q0 as u8 & 0xF) << 4) | (q1 as u8 & 0xF);
+            out[nibble_base + j / 2] = packed;
+        }
+    }
+
+    out
+}
+
+/// Decompress bytes produced by `polar_quant_compress` back to f32 vectors.
+fn polar_quant_decompress(bytes: &[u8], num_vecs: usize, head_dim: usize) -> Vec<f32> {
+    let nibble_bytes = head_dim.div_ceil(2);
+    let bytes_per_vec = 2 + nibble_bytes;
+    let mut out = vec![0.0f32; num_vecs * head_dim];
+
+    for i in 0..num_vecs {
+        let base = i * bytes_per_vec;
+        let row_base = i * head_dim;
+
+        // Read f16 magnitude
+        let mag_bits = u16::from_le_bytes([bytes[base], bytes[base + 1]]);
+        let mag = f16::from_bits(mag_bits).to_f32();
+
+        if mag == 0.0 {
+            continue;
+        }
+
+        let scale = mag / 7.0;
+        let nibble_base = base + 2;
+
+        for j in (0..head_dim).step_by(2) {
+            let byte = bytes[nibble_base + j / 2];
+
+            // Unpack high nibble (q0)
+            let raw0 = (byte >> 4) & 0xF;
+            let n0 = if raw0 > 7 {
+                raw0 as i32 - 16
+            } else {
+                raw0 as i32
+            };
+            out[row_base + j] = n0 as f32 * scale;
+
+            // Unpack low nibble (q1)
+            if j + 1 < head_dim {
+                let raw1 = byte & 0xF;
+                let n1 = if raw1 > 7 {
+                    raw1 as i32 - 16
+                } else {
+                    raw1 as i32
+                };
+                out[row_base + j + 1] = n1 as f32 * scale;
+            }
+        }
+    }
+
+    out
+}
+
+/// Compress using full f16 (no direction quantization, just f32 → f16).
+fn full_compress(data: &[f32]) -> Vec<u8> {
+    let mut out = vec![0u8; data.len() * 2];
+    for (i, &v) in data.iter().enumerate() {
+        let bits = f16::from_f32(v).to_bits().to_le_bytes();
+        out[i * 2] = bits[0];
+        out[i * 2 + 1] = bits[1];
+    }
+    out
+}
+
+/// Decompress full f16 bytes back to f32.
+fn full_decompress(bytes: &[u8], num_elems: usize) -> Vec<f32> {
+    (0..num_elems)
+        .map(|i| {
+            let bits = u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+            f16::from_bits(bits).to_f32()
+        })
+        .collect()
+}
+
+impl<B: Backend> AttentionCache<B> for CompressedKvCache<B> {
+    fn update_layer(
+        &mut self,
+        layer_idx: usize,
+        k: Tensor<B, 4>,
+        v: Tensor<B, 4>,
+    ) -> CacheUpdate<B> {
+        let [batch, num_heads, new_seq, head_dim] = k.dims();
+        let device = k.device();
+
+        // Pull new K/V to CPU as f32
+        let k_new: Vec<f32> = k.to_data().to_vec().expect("k to_vec");
+        let v_new: Vec<f32> = v.to_data().to_vec().expect("v to_vec");
+
+        let layer = &mut self.layers[layer_idx];
+
+        // First update initialises metadata
+        if layer.seq_len == 0 {
+            layer.batch = batch;
+            layer.num_heads = num_heads;
+            layer.head_dim = head_dim;
+        }
+
+        // Compress and append
+        match self.method {
+            KvQuantMethod::Full => {
+                layer.k_bytes.extend(full_compress(&k_new));
+                layer.v_bytes.extend(full_compress(&v_new));
+            }
+            KvQuantMethod::PolarQuant => {
+                // data is flat [batch * num_heads * new_seq * head_dim]; treat each
+                // head_dim-sized chunk as one vector
+                layer.k_bytes.extend(polar_quant_compress(&k_new, head_dim));
+                layer.v_bytes.extend(polar_quant_compress(&v_new, head_dim));
+            }
+        }
+
+        layer.seq_len += new_seq;
+
+        // Decompress full accumulated sequence
+        let total_seq = layer.seq_len;
+        let num_vecs = batch * num_heads * total_seq;
+        let total_elems = num_vecs * head_dim;
+
+        let k_full_f32: Vec<f32> = match self.method {
+            KvQuantMethod::Full => full_decompress(&layer.k_bytes, total_elems),
+            KvQuantMethod::PolarQuant => polar_quant_decompress(&layer.k_bytes, num_vecs, head_dim),
+        };
+        let v_full_f32: Vec<f32> = match self.method {
+            KvQuantMethod::Full => full_decompress(&layer.v_bytes, total_elems),
+            KvQuantMethod::PolarQuant => polar_quant_decompress(&layer.v_bytes, num_vecs, head_dim),
+        };
+
+        let k_full = Tensor::<B, 1>::from_data(
+            TensorData::new(k_full_f32, [batch * num_heads * total_seq * head_dim]),
+            &device,
+        )
+        .reshape([batch, num_heads, total_seq, head_dim]);
+
+        let v_full = Tensor::<B, 1>::from_data(
+            TensorData::new(v_full_f32, [batch * num_heads * total_seq * head_dim]),
+            &device,
+        )
+        .reshape([batch, num_heads, total_seq, head_dim]);
+
+        CacheUpdate {
+            k: k_full,
+            v: v_full,
+        }
+    }
+
+    fn seq_len(&self) -> usize {
+        self.layers.first().map(|l| l.seq_len).unwrap_or(0)
+    }
+
+    fn clear(&mut self) {
+        for layer in &mut self.layers {
+            layer.clear();
+        }
     }
 }
 

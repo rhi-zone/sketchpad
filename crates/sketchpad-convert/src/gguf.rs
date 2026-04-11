@@ -482,6 +482,31 @@ impl GgufFile {
         (as_f16, as_quantized)
     }
 
+    /// Estimate KV cache VRAM at full bf16 precision for a given sequence length.
+    ///
+    /// Returns `None` if required metadata keys are absent (graceful degradation for
+    /// GGUFs that omit architecture metadata).
+    ///
+    /// Formula: `2 (K+V) * block_count * kv_head_count * head_dim * seq_len * 2 (bf16 bytes)`
+    pub fn estimated_kv_cache_bytes(&self, seq_len: usize) -> Option<u64> {
+        let meta_u64 = |key: &str| -> Option<u64> {
+            match self.metadata.get(key) {
+                Some(MetadataValue::U64(v)) => Some(*v),
+                Some(MetadataValue::U32(v)) => Some(*v as u64),
+                _ => None,
+            }
+        };
+
+        let block_count = meta_u64("llm.block_count")?;
+        let head_count = meta_u64("llm.attention.head_count")?;
+        let embedding_length = meta_u64("llm.embedding_length")?;
+        let kv_head_count = meta_u64("llm.attention.kv_head_count").unwrap_or(head_count);
+
+        let head_dim = embedding_length / head_count;
+        let kv_cache_bytes = 2 * block_count * kv_head_count * head_dim * seq_len as u64 * 2;
+        Some(kv_cache_bytes)
+    }
+
     /// Return an Arc clone of the memory-mapped file, for zero-copy sharing.
     pub fn mmap_arc(&self) -> Arc<memmap2::Mmap> {
         Arc::clone(&self.mmap)
