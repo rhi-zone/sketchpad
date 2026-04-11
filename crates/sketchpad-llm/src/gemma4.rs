@@ -318,16 +318,15 @@ impl<B: Backend> Gemma4Attention<B> {
         softcap: f32,
         mut cache: Option<&mut dyn AttentionCache<B>>,
         layer_idx: usize,
-        offload: Option<&AttentionOffload>,
+        offload: Option<&AttentionOffload<B>>,
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
-        let device = x.device();
 
         let (q, k, v) = match offload {
             Some(off) => (
-                off.q_proj.forward(x.clone(), &device),
-                off.k_proj.forward(x.clone(), &device),
-                off.v_proj.forward(x, &device),
+                off.q_proj.forward_3d(x.clone()),
+                off.k_proj.forward_3d(x.clone()),
+                off.v_proj.forward_3d(x),
             ),
             None => (
                 self.q_proj.forward(x.clone()),
@@ -382,7 +381,7 @@ impl<B: Backend> Gemma4Attention<B> {
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
         match offload {
-            Some(off) => off.o_proj.forward(out, &device),
+            Some(off) => off.o_proj.forward_3d(out),
             None => self.o_proj.forward(out),
         }
     }
@@ -413,13 +412,12 @@ pub struct Gemma4DenseFfn<B: Backend> {
 }
 
 impl<B: Backend> Gemma4DenseFfn<B> {
-    pub fn forward(&self, x: Tensor<B, 3>, offload: Option<&DenseFfnOffload>) -> Tensor<B, 3> {
-        let device = x.device();
+    pub fn forward(&self, x: Tensor<B, 3>, offload: Option<&DenseFfnOffload<B>>) -> Tensor<B, 3> {
         // GeGLU: GELU(gate) * up
         let (gate, up) = match offload {
             Some(off) => (
-                burn::tensor::activation::gelu(off.gate_proj.forward(x.clone(), &device)),
-                off.up_proj.forward(x, &device),
+                burn::tensor::activation::gelu(off.gate_proj.forward_3d(x.clone())),
+                off.up_proj.forward_3d(x),
             ),
             None => (
                 burn::tensor::activation::gelu(self.gate_proj.forward(x.clone())),
@@ -427,7 +425,7 @@ impl<B: Backend> Gemma4DenseFfn<B> {
             ),
         };
         match offload {
-            Some(off) => off.down_proj.forward(gate * up, &device),
+            Some(off) => off.down_proj.forward_3d(gate * up),
             None => self.down_proj.forward(gate * up),
         }
     }
@@ -703,7 +701,7 @@ impl<B: Backend> Gemma4Ffn<B> {
         &self,
         x: Tensor<B, 3>,
         router_raw: Option<Tensor<B, 3>>,
-        ffn_offload: Option<&DenseFfnOffload>,
+        ffn_offload: Option<&DenseFfnOffload<B>>,
     ) -> Tensor<B, 3> {
         match self {
             Self::Dense(ffn) => ffn.forward(x, ffn_offload),
@@ -787,7 +785,7 @@ impl<B: Backend> Gemma4Layer<B> {
         softcap: f32,
         cache: Option<&mut dyn AttentionCache<B>>,
         layer_idx: usize,
-        layer_offload: Option<&LayerOffload>,
+        layer_offload: Option<&LayerOffload<B>>,
     ) -> Tensor<B, 3> {
         let mask = if self.use_sliding_window {
             sliding_mask
@@ -860,8 +858,9 @@ pub struct Gemma4<B: Backend> {
 pub struct Gemma4Runtime<B: Backend> {
     pub ropes: HashMap<usize, RotaryEmbedding<B>>,
     pub config: Gemma4Config,
-    /// CPU-offloaded weights, indexed by layer. `None` when running normally (all weights in VRAM).
-    pub offloaded_layers: Option<Vec<LayerOffload>>,
+    /// Offloaded weights (CPU-quantized or GPU-quantized), indexed by layer.
+    /// `None` when all weights live in VRAM as normal `Linear<B>` tensors.
+    pub offloaded_layers: Option<Vec<LayerOffload<B>>>,
 }
 
 /// Output from the Gemma 4 model

@@ -46,5 +46,8 @@ pub use pool3d::{Pool3dOptions, avg_pool3d, max_pool3d};
 pub use quantized_matmul::{GpuQuantType, GpuQuantizedLinear, dequantize_q4k, dequantize_q8_0};
 
 // Re-export key types for consumers
-pub use burn_cubecl::{CubeRuntime, tensor::CubeTensor};
+pub use burn_cubecl::{
+    BoolElement, CubeBackend, CubeRuntime, FloatElement, IntElement, tensor::CubeTensor,
+};
+pub use cubecl;
 pub use cubecl::server::LaunchError;

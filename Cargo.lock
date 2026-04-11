@@ -5773,6 +5773,7 @@ dependencies = [
  "serde_json",
  "sketchpad-convert",
  "sketchpad-core",
+ "sketchpad-cubecl",
  "thiserror 2.0.18",
  "tokenizers",
  "tokio",

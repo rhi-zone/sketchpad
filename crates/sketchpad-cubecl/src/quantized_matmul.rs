@@ -345,6 +345,32 @@ impl<R: CubeRuntime> GpuQuantizedLinear<R> {
         }
     }
 
+    /// Run a linear projection on a 3D Burn tensor: [batch, seq, in] → [batch, seq, out].
+    ///
+    /// Converts to `CubeTensor<R>`, dequantizes, runs matmul, converts back.
+    /// For use when integrating with Burn model code using `CubeBackend`.
+    pub fn forward_burn<F, I, BT>(
+        &self,
+        input: burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 3>,
+    ) -> burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 3>
+    where
+        F: burn_cubecl::FloatElement,
+        I: burn_cubecl::IntElement,
+        BT: burn_cubecl::BoolElement,
+    {
+        use crate::groupnorm_silu::{cube_to_tensor, tensor_to_cube};
+
+        let [batch, seq, _] = input.dims();
+        // Flatten to [batch*seq, in_features] for 2D matmul
+        let flat: burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 2> =
+            input.reshape([batch * seq, self.in_features]);
+        let cube_input = tensor_to_cube(flat);
+        let cube_out = self.forward(cube_input);
+        let out_flat: burn::tensor::Tensor<burn_cubecl::CubeBackend<R, F, I, BT>, 2> =
+            cube_to_tensor(cube_out);
+        out_flat.reshape([batch, seq, self.out_features])
+    }
+
     /// Run a linear projection: `output = input @ weight.T`
     ///
     /// - `input` shape: `[batch, seq, in_features]` or `[seq, in_features]` (2D)

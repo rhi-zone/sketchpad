@@ -350,32 +350,48 @@ impl QuantizedLinear {
     }
 }
 
-/// CPU-offloaded attention weights for a single transformer layer.
+/// Trait for offloaded weight projections.
 ///
-/// Used when VRAM is insufficient to hold attention weights. Weights stay
-/// in CPU RAM in quantized form and are dequantized on each forward call.
-pub struct AttentionOffload {
-    pub q_proj: QuantizedLinear,
-    pub k_proj: QuantizedLinear,
-    pub v_proj: QuantizedLinear,
-    pub o_proj: QuantizedLinear,
+/// Implementations include CPU-quantized (`QuantizedLinear`) and GPU-quantized
+/// (`GpuQuantizedLinear<R>`) variants. Using a trait object allows the same
+/// `AttentionOffload<B>` / `DenseFfnOffload<B>` types to dispatch either path.
+pub trait LinearForward3d<B: Backend>: Send + Sync {
+    fn forward_3d(&self, x: Tensor<B, 3>) -> Tensor<B, 3>;
 }
 
-/// CPU-offloaded dense FFN weights for a single transformer layer.
-pub struct DenseFfnOffload {
-    pub gate_proj: QuantizedLinear,
-    pub up_proj: QuantizedLinear,
-    pub down_proj: QuantizedLinear,
+impl<B: Backend> LinearForward3d<B> for QuantizedLinear {
+    fn forward_3d(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+        let device = x.device();
+        self.forward(x, &device)
+    }
 }
 
-/// CPU-offloaded weights for a single transformer layer.
+/// Offloaded attention weights for a single transformer layer.
+///
+/// Each projection can be CPU-quantized or GPU-quantized depending on the
+/// `Box<dyn LinearForward3d<B>>` implementation stored in the field.
+pub struct AttentionOffload<B: Backend> {
+    pub q_proj: Box<dyn LinearForward3d<B>>,
+    pub k_proj: Box<dyn LinearForward3d<B>>,
+    pub v_proj: Box<dyn LinearForward3d<B>>,
+    pub o_proj: Box<dyn LinearForward3d<B>>,
+}
+
+/// Offloaded dense FFN weights for a single transformer layer.
+pub struct DenseFfnOffload<B: Backend> {
+    pub gate_proj: Box<dyn LinearForward3d<B>>,
+    pub up_proj: Box<dyn LinearForward3d<B>>,
+    pub down_proj: Box<dyn LinearForward3d<B>>,
+}
+
+/// Offloaded weights for a single transformer layer.
 ///
 /// MoE expert weights are excluded — they are already zero-copy mmap'd
 /// via `QuantizedFusedExperts`, so they don't need a separate offload path.
-pub struct LayerOffload {
-    pub attention: AttentionOffload,
+pub struct LayerOffload<B: Backend> {
+    pub attention: AttentionOffload<B>,
     /// Dense FFN offload. `None` for MoE layers (experts are already zero-copy).
-    pub dense_ffn: Option<DenseFfnOffload>,
+    pub dense_ffn: Option<DenseFfnOffload<B>>,
 }
 
 /// Matrix multiply without allocating a `QuantizedTensor`.

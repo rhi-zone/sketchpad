@@ -9,10 +9,12 @@ license.workspace = true
 [features]
 default = []
 serve = ["axum", "tokio"]
+cubecl = ["dep:sketchpad-cubecl"]
 
 [dependencies]
 sketchpad-core = { path = "../sketchpad-core" }
 sketchpad-convert = { path = "../sketchpad-convert" }
+sketchpad-cubecl = { workspace = true, optional = true }
 burn = { workspace = true }
 memmap2 = "0.9"
 thiserror = { workspace = true }
