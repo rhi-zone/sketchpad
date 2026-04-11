@@ -81,6 +81,9 @@ pub mod qwen_loader;
 pub mod rwkv;
 pub mod rwkv_loader;
 
+// Quantized inference
+pub mod quantized;
+
 // Sampling
 pub mod sampling;
 

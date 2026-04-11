@@ -12,9 +12,10 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::gemma4::{
-    Gemma4, Gemma4Attention, Gemma4Config, Gemma4DenseFfn, Gemma4ExpertFfn, Gemma4Ffn, Gemma4Layer,
-    Gemma4MoE, Gemma4Runtime,
+    ExpertWeights, Gemma4, Gemma4Attention, Gemma4Config, Gemma4DenseFfn, Gemma4ExpertFfn,
+    Gemma4Ffn, Gemma4Layer, Gemma4MoE, Gemma4Runtime,
 };
+use crate::quantized::QuantizedFusedExperts;
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 
@@ -418,6 +419,8 @@ fn load_moe<B: Backend>(
         device,
     )?;
 
+    let expert_inter = config.expert_intermediate_size;
+
     // GGUF stores experts as fused tensors:
     // ffn_gate_up_exps.weight: [hidden_size, expert_inter * 2, num_experts]
     // ffn_down_exps.weight:    [expert_inter, hidden_size, num_experts]
@@ -425,56 +428,20 @@ fn load_moe<B: Backend>(
     let gate_up_name = format!("blk.{idx}.ffn_gate_up_exps.weight");
     let down_name = format!("blk.{idx}.ffn_down_exps.weight");
 
-    let expert_inter = config.expert_intermediate_size;
-
     let experts = if file.contains(&gate_up_name) {
-        // Load fused expert tensors and split per-expert
-        let gate_up_all: Tensor<B, 3> = file.load_f32(&gate_up_name, device)?;
-        let down_all: Tensor<B, 3> = file.load_f32(&down_name, device)?;
+        // Keep expert weights quantized — copy raw bytes, don't dequantize
+        let (gate_up_raw, gate_up_info) = file.tensor_raw_data(&gate_up_name)?;
+        let (down_raw, down_info) = file.tensor_raw_data(&down_name)?;
 
-        let mut experts = Vec::with_capacity(config.num_experts);
-        for e in 0..config.num_experts {
-            // Slice expert e from last dimension
-            // gate_up: [hidden_size, expert_inter*2, 1] → [hidden_size, expert_inter*2]
-            let gate_up = gate_up_all
-                .clone()
-                .slice([0..config.hidden_size, 0..expert_inter * 2, e..e + 1])
-                .reshape([config.hidden_size, expert_inter * 2]);
-
-            // Split gate and up: gate is first half, up is second half of dim 1
-            let gate_weight = gate_up
-                .clone()
-                .slice([0..config.hidden_size, 0..expert_inter]);
-            let up_weight = gate_up.slice([0..config.hidden_size, expert_inter..expert_inter * 2]);
-
-            // down: [expert_inter, hidden_size, 1] → [expert_inter, hidden_size]
-            let down_weight = down_all
-                .clone()
-                .slice([0..expert_inter, 0..config.hidden_size, e..e + 1])
-                .reshape([expert_inter, config.hidden_size]);
-
-            let mut gate_proj = LinearConfig::new(config.hidden_size, expert_inter)
-                .with_bias(false)
-                .init(device);
-            gate_proj.weight = Param::from_tensor(gate_weight);
-
-            let mut up_proj = LinearConfig::new(config.hidden_size, expert_inter)
-                .with_bias(false)
-                .init(device);
-            up_proj.weight = Param::from_tensor(up_weight);
-
-            let mut down_proj = LinearConfig::new(expert_inter, config.hidden_size)
-                .with_bias(false)
-                .init(device);
-            down_proj.weight = Param::from_tensor(down_weight);
-
-            experts.push(Gemma4ExpertFfn {
-                gate_proj,
-                up_proj,
-                down_proj,
-            });
-        }
-        experts
+        ExpertWeights::Quantized(QuantizedFusedExperts::new(
+            gate_up_raw.to_vec(),
+            gate_up_info.ggml_type,
+            down_raw.to_vec(),
+            down_info.ggml_type,
+            config.hidden_size,
+            expert_inter,
+            config.num_experts,
+        ))
     } else {
         // Fallback: try per-expert tensors (unlikely for GGUF but handle gracefully)
         let mut experts = Vec::with_capacity(config.num_experts);
@@ -504,10 +471,10 @@ fn load_moe<B: Backend>(
             };
             experts.push(expert);
         }
-        experts
+        ExpertWeights::Full(experts)
     };
 
-    // Shared expert: uses the standard FFN tensors on MoE layers
+    // Shared expert: uses the standard FFN tensors on MoE layers (dequantized to f32)
     let shared_expert = Gemma4ExpertFfn {
         gate_proj: load_linear(
             file,

@@ -26,6 +26,8 @@ use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::{causal_mask, sliding_window_mask};
 
+use crate::quantized::QuantizedFusedExperts;
+
 /// Gemma 4 Model Configuration
 #[derive(Debug, Clone)]
 pub struct Gemma4Config {
@@ -241,7 +243,7 @@ impl Gemma4LayerConfig {
 }
 
 /// Gemma 4 attention (same structure as Gemma 2)
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4Attention<B: Backend> {
     pub q_proj: Linear<B>,
     pub k_proj: Linear<B>,
@@ -358,7 +360,7 @@ impl<B: Backend> Gemma4Attention<B> {
 }
 
 /// Dense FFN with GeGLU (GELU gating) for non-MoE layers
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4DenseFfn<B: Backend> {
     pub gate_proj: Linear<B>,
     pub up_proj: Linear<B>,
@@ -375,7 +377,7 @@ impl<B: Backend> Gemma4DenseFfn<B> {
 }
 
 /// Single expert FFN (GeGLU) for MoE layers
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4ExpertFfn<B: Backend> {
     pub gate_proj: Linear<B>,
     pub up_proj: Linear<B>,
@@ -396,18 +398,28 @@ impl<B: Backend> Gemma4ExpertFfn<B> {
 /// Contains a router, a set of sparse experts, and shared experts
 /// that are always active. The output combines routed expert output
 /// with shared expert output.
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4MoE<B: Backend> {
     /// Router: linear projection from hidden_size to num_experts
     pub router: Linear<B>,
-    /// Sparse experts (selected by router)
-    pub experts: Vec<Gemma4ExpertFfn<B>>,
+    /// Sparse experts (selected by router) — either full-precision or quantized
+    pub experts: ExpertWeights<B>,
     /// Shared experts (always active, output added to routed output)
     pub shared_experts: Vec<Gemma4ExpertFfn<B>>,
     /// Number of experts to activate per token
     pub top_k: usize,
     /// Total number of routed experts
     pub num_experts: usize,
+}
+
+/// Storage for routed expert weights — either full-precision Linear layers
+/// or quantized fused tensors kept in their GGUF format.
+#[derive(Debug)]
+pub enum ExpertWeights<B: Backend> {
+    /// Full-precision experts (from safetensors or init)
+    Full(Vec<Gemma4ExpertFfn<B>>),
+    /// Quantized fused experts (from GGUF — keeps weights quantized)
+    Quantized(QuantizedFusedExperts),
 }
 
 impl<B: Backend> Gemma4MoE<B> {
@@ -424,19 +436,21 @@ impl<B: Backend> Gemma4MoE<B> {
             .with_bias(false)
             .init(device);
 
-        let experts = (0..num_experts)
-            .map(|_| Gemma4ExpertFfn {
-                gate_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
-                    .with_bias(false)
-                    .init(device),
-                up_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
-                    .with_bias(false)
-                    .init(device),
-                down_proj: LinearConfig::new(expert_intermediate_size, hidden_size)
-                    .with_bias(false)
-                    .init(device),
-            })
-            .collect();
+        let experts = ExpertWeights::Full(
+            (0..num_experts)
+                .map(|_| Gemma4ExpertFfn {
+                    gate_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
+                        .with_bias(false)
+                        .init(device),
+                    up_proj: LinearConfig::new(hidden_size, expert_intermediate_size)
+                        .with_bias(false)
+                        .init(device),
+                    down_proj: LinearConfig::new(expert_intermediate_size, hidden_size)
+                        .with_bias(false)
+                        .init(device),
+                })
+                .collect(),
+        );
 
         let shared_experts = (0..num_shared_experts)
             .map(|_| Gemma4ExpertFfn {
@@ -502,7 +516,10 @@ impl<B: Backend> Gemma4MoE<B> {
             );
 
             let expert_input = x_flat.clone().reshape([num_tokens, 1, hidden_size]);
-            let expert_out = self.experts[expert_idx].forward(expert_input);
+            let expert_out = match &self.experts {
+                ExpertWeights::Full(experts) => experts[expert_idx].forward(expert_input),
+                ExpertWeights::Quantized(fused) => fused.forward_expert(expert_idx, expert_input),
+            };
             let expert_out = expert_out.reshape([num_tokens, hidden_size]);
 
             let weighted_out = expert_out * expert_weights.unsqueeze_dim(1);
@@ -562,7 +579,7 @@ impl<B: Backend> Gemma4MoE<B> {
 }
 
 /// FFN variant: either dense or MoE
-#[derive(Module, Debug)]
+#[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Gemma4Ffn<B: Backend> {
     Dense(Gemma4DenseFfn<B>),
@@ -579,7 +596,7 @@ impl<B: Backend> Gemma4Ffn<B> {
 }
 
 /// Gemma 4 transformer layer with pre/post norms and MoE/dense FFN
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4Layer<B: Backend> {
     pub attention: Gemma4Attention<B>,
     pub ffn: Gemma4Ffn<B>,
@@ -676,7 +693,7 @@ impl<B: Backend> Gemma4Layer<B> {
 }
 
 /// Gemma 4 Model
-#[derive(Module, Debug)]
+#[derive(Debug)]
 pub struct Gemma4<B: Backend> {
     pub embed_tokens: Embedding<B>,
     pub layers: Vec<Gemma4Layer<B>>,

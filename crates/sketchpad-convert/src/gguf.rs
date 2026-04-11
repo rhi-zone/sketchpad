@@ -88,7 +88,7 @@ impl GgmlType {
     }
 
     /// Number of elements per quantization block
-    fn block_size(self) -> usize {
+    pub fn block_size(self) -> usize {
         match self {
             Self::F32 | Self::F16 => 1,
             Self::Q4_0 | Self::Q4_1 | Self::Q5_0 | Self::Q5_1 | Self::Q8_0 => 32,
@@ -97,7 +97,7 @@ impl GgmlType {
     }
 
     /// Size in bytes of one quantization block
-    fn type_size(self) -> usize {
+    pub fn type_size(self) -> usize {
         match self {
             Self::F32 => 4,
             Self::F16 => 2,
@@ -382,6 +382,29 @@ impl GgufFile {
         self.tensors.get(name)
     }
 
+    /// Get raw tensor data bytes and info without dequantizing
+    pub fn tensor_raw_data(&self, name: &str) -> Result<(&[u8], &GgufTensorInfo), GgufError> {
+        let info = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| GgufError::TensorNotFound(name.to_string()))?;
+
+        let n_elements: usize = info.shape.iter().product();
+        let block_size = info.ggml_type.block_size();
+        let n_blocks = n_elements / block_size;
+        let data_size = n_blocks * info.ggml_type.type_size();
+
+        let abs_offset = self.tensor_data_offset + info.offset as usize;
+        if abs_offset + data_size > self.data_len {
+            return Err(GgufError::UnexpectedEof(abs_offset + data_size));
+        }
+
+        // Safety: mmap is valid for lifetime of self
+        let data = unsafe { std::slice::from_raw_parts(self.data_ptr.add(abs_offset), data_size) };
+
+        Ok((data, info))
+    }
+
     /// Load a tensor and dequantize to f32
     pub fn load_f32<B: Backend, const D: usize>(
         &self,
@@ -449,7 +472,11 @@ fn align_offset(offset: usize, alignment: usize) -> usize {
 }
 
 /// Dequantize raw block data to f32
-fn dequantize(data: &[u8], ggml_type: GgmlType, n_elements: usize) -> Result<Vec<f32>, GgufError> {
+pub fn dequantize(
+    data: &[u8],
+    ggml_type: GgmlType,
+    n_elements: usize,
+) -> Result<Vec<f32>, GgufError> {
     let mut output = vec![0.0f32; n_elements];
 
     match ggml_type {

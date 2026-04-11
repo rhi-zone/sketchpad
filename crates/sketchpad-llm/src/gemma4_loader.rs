@@ -11,8 +11,8 @@ use sketchpad_convert::loader::SafeTensorFile;
 use thiserror::Error;
 
 use crate::gemma4::{
-    Gemma4, Gemma4Attention, Gemma4Config, Gemma4DenseFfn, Gemma4ExpertFfn, Gemma4Ffn, Gemma4Layer,
-    Gemma4MoE, Gemma4Runtime,
+    ExpertWeights, Gemma4, Gemma4Attention, Gemma4Config, Gemma4DenseFfn, Gemma4ExpertFfn,
+    Gemma4Ffn, Gemma4Layer, Gemma4MoE, Gemma4Runtime,
 };
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
@@ -356,7 +356,7 @@ fn load_gemma4_moe<B: Backend>(
 
     Ok(Gemma4MoE {
         router,
-        experts,
+        experts: ExpertWeights::Full(experts),
         shared_experts,
         top_k: config.num_experts_per_tok,
         num_experts: config.num_experts,
