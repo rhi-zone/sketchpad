@@ -107,10 +107,7 @@ cargo build -p burn-models-cli --no-default-features --features cuda,preset-qual
 ```
 
 ### Code Organization (High Priority)
-- [ ] Split pipeline.rs (~2k lines) into separate files by model:
-  - sd1x.rs (SD 1.x pipelines)
-  - sdxl.rs (SDXL pipelines)
-  - common.rs (shared traits, utilities)
+- [x] Split pipeline.rs into separate files by model: sd1x.rs, sdxl.rs, mod.rs
 - [ ] Split large model files generally (unet_sd.rs, blocks.rs, etc.)
 
 - [x] SD1x CLI defaults: 512x512 (native resolution), f16 precision (2026-01-07)
@@ -288,10 +285,7 @@ See `docs/cubecl-guide.md` for implementation details.
     - Detects prefix (decoder, vae.decoder, first_stage_model.decoder)
     - Loads conv_in, mid blocks, all up blocks, conv_out
     - Each block: ResnetBlock, SelfAttention, Upsample
-  - [ ] CompVis naming support for single-file checkpoints (CivitAI models)
-    - Map `input_blocks`/`middle_block`/`output_blocks` to HF naming
-    - Or add separate CompVis loader variant
-    - Affects UNet and VAE loaders
+  - [x] CompVis naming support for single-file checkpoints (CivitAI models) — `UNetNaming::detect()` auto-detects, routes to `load_unet_compvis()`; VAE supports `first_stage_model.decoder` prefix
 
 ### Future Architectures
 
