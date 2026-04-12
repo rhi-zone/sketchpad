@@ -106,7 +106,9 @@ impl ChatTemplate {
             ModelType::Phi => Self::Phi,
             ModelType::Qwen => Self::Qwen,
             ModelType::DeepSeek => Self::ChatMl,
-            ModelType::Rwkv | ModelType::Mamba | ModelType::Jamba => Self::Simple,
+            ModelType::Rwkv | ModelType::Mamba | ModelType::Jamba | ModelType::Griffin => {
+                Self::Simple
+            }
         }
     }
 

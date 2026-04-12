@@ -304,6 +304,10 @@ pub enum KvQuantMethod {
     Full,
     /// PolarQuant: magnitude (f16) + 4-bit direction quantization (~4x vs f16)
     PolarQuant,
+    /// Quantized Johnson-Lindenstrauss: random projection + 1-bit sign quantization.
+    /// `projection_dim`: number of projection dimensions (default: head_dim / 4).
+    /// Compression ratio: (2 + projection_dim/8) / (head_dim * 2) bytes.
+    QJL { projection_dim: usize },
 }
 
 impl KvQuantMethod {
@@ -312,6 +316,9 @@ impl KvQuantMethod {
         match self {
             Self::Full => 1.0,
             Self::PolarQuant => (2.0 + head_dim as f64 / 2.0) / (head_dim as f64 * 2.0),
+            Self::QJL { projection_dim } => {
+                (2.0 + *projection_dim as f64 / 8.0) / (head_dim as f64 * 2.0)
+            }
         }
     }
 }
@@ -349,13 +356,43 @@ impl CompressedLayerCache {
 
 /// KV cache that stores compressed key/value tensors on the CPU
 ///
-/// Uses PolarQuant compression (~4x vs f16) or full f16 precision.
-/// Keys and values are compressed after each step and decompressed when
-/// returning the full sequence for attention computation.
+/// Uses PolarQuant compression (~4x vs f16), QJL (1-bit random projection), or
+/// full f16 precision. Keys and values are compressed after each step and
+/// decompressed when returning the full sequence for attention computation.
 pub struct CompressedKvCache<B: Backend> {
     layers: Vec<CompressedLayerCache>,
     method: KvQuantMethod,
+    /// Fixed random projection matrix for QJL, shape [projection_dim * head_dim].
+    /// Row-major: row `i` = R[i, :], length head_dim.
+    /// None for non-QJL methods.
+    projection: Option<Vec<f32>>,
     _phantom: PhantomData<B>,
+}
+
+/// Generate deterministic pseudo-random f32 values scaled by `scale` using an LCG
+/// and Box-Muller transform (seed=42).  No external dependencies required.
+fn lcg_normal_f32(count: usize, scale: f32) -> Vec<f32> {
+    // LCG parameters from Numerical Recipes
+    const A: u64 = 1_664_525;
+    const C: u64 = 1_013_904_223;
+    let mut state: u64 = 42;
+    let mut out = Vec::with_capacity(count);
+    let mut i = 0;
+    while i < count {
+        // Box-Muller transform: two uniform samples → two normal samples
+        state = state.wrapping_mul(A).wrapping_add(C);
+        let u1 = ((state >> 11) as f32 / (1u64 << 53) as f32).max(1e-10);
+        state = state.wrapping_mul(A).wrapping_add(C);
+        let u2 = (state >> 11) as f32 / (1u64 << 53) as f32;
+        let r = (-2.0 * u1.ln()).sqrt() * scale;
+        out.push(r * (std::f32::consts::TAU * u2).cos());
+        i += 1;
+        if i < count {
+            out.push(r * (std::f32::consts::TAU * u2).sin());
+            i += 1;
+        }
+    }
+    out
 }
 
 impl<B: Backend> CompressedKvCache<B> {
@@ -364,21 +401,32 @@ impl<B: Backend> CompressedKvCache<B> {
     /// # Arguments
     ///
     /// * `num_layers` - Number of transformer layers
-    /// * `num_heads` - Number of KV heads (informational, derived from tensors at runtime)
-    /// * `head_dim` - Dimension per head (informational, derived from tensors at runtime)
+    /// * `_num_heads` - Number of KV heads (informational, derived from tensors at runtime)
+    /// * `head_dim` - Dimension per head; used to generate the QJL projection matrix
     /// * `method` - Quantization method to use
     pub fn new(
         num_layers: usize,
         _num_heads: usize,
-        _head_dim: usize,
+        head_dim: usize,
         method: KvQuantMethod,
     ) -> Self {
         let layers = (0..num_layers)
             .map(|_| CompressedLayerCache::new())
             .collect();
+
+        // Pre-generate fixed QJL projection matrix R ~ N(0, 1/proj_dim)
+        let projection = if let KvQuantMethod::QJL { projection_dim } = &method {
+            let proj_dim = *projection_dim;
+            let scale = (1.0_f32 / proj_dim as f32).sqrt();
+            Some(lcg_normal_f32(proj_dim * head_dim, scale))
+        } else {
+            None
+        };
+
         Self {
             layers,
             method,
+            projection,
             _phantom: PhantomData,
         }
     }
@@ -483,6 +531,90 @@ fn polar_quant_decompress(bytes: &[u8], num_vecs: usize, head_dim: usize) -> Vec
     out
 }
 
+/// Compress a flat f32 array using QJL: f16 magnitude + 1-bit packed sign of R*v.
+///
+/// Layout per vector: 2 bytes (f16 magnitude) + ceil(proj_dim / 8) bit-packed sign bytes.
+fn qjl_compress(data: &[f32], head_dim: usize, projection: &[f32], proj_dim: usize) -> Vec<u8> {
+    let num_vecs = data.len() / head_dim;
+    let sign_bytes = proj_dim.div_ceil(8);
+    let bytes_per_vec = 2 + sign_bytes;
+    let mut out = vec![0u8; num_vecs * bytes_per_vec];
+
+    for i in 0..num_vecs {
+        let v = &data[i * head_dim..(i + 1) * head_dim];
+        let base = i * bytes_per_vec;
+
+        // Magnitude
+        let mag: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let mag_bits = f16::from_f32(mag).to_bits().to_le_bytes();
+        out[base] = mag_bits[0];
+        out[base + 1] = mag_bits[1];
+
+        if mag == 0.0 {
+            continue;
+        }
+
+        // Project and pack signs: sign bit = 1 iff R[k,:] · v >= 0
+        let sign_base = base + 2;
+        for k in 0..proj_dim {
+            let row = &projection[k * head_dim..(k + 1) * head_dim];
+            let dot: f32 = row.iter().zip(v.iter()).map(|(r, x)| r * x).sum();
+            if dot >= 0.0 {
+                out[sign_base + k / 8] |= 1 << (k % 8);
+            }
+        }
+    }
+
+    out
+}
+
+/// Decompress bytes produced by `qjl_compress` back to approximate f32 vectors.
+///
+/// Approximation: v_approx = magnitude * (π/2 / proj_dim) * R^T * signs
+fn qjl_decompress(
+    bytes: &[u8],
+    num_vecs: usize,
+    head_dim: usize,
+    projection: &[f32],
+    proj_dim: usize,
+) -> Vec<f32> {
+    let sign_bytes = proj_dim.div_ceil(8);
+    let bytes_per_vec = 2 + sign_bytes;
+    let scale_factor = std::f32::consts::FRAC_PI_2 / proj_dim as f32;
+    let mut out = vec![0.0f32; num_vecs * head_dim];
+
+    for i in 0..num_vecs {
+        let base = i * bytes_per_vec;
+        let row_base = i * head_dim;
+
+        let mag_bits = u16::from_le_bytes([bytes[base], bytes[base + 1]]);
+        let mag = f16::from_bits(mag_bits).to_f32();
+
+        if mag == 0.0 {
+            continue;
+        }
+
+        let sign_base = base + 2;
+        let scale = mag * scale_factor;
+
+        // v_approx[j] = scale * sum_k( sign_k * R[k, j] )
+        for k in 0..proj_dim {
+            let bit = (bytes[sign_base + k / 8] >> (k % 8)) & 1;
+            let sign: f32 = if bit == 1 { 1.0 } else { -1.0 };
+            let row = &projection[k * head_dim..(k + 1) * head_dim];
+            for j in 0..head_dim {
+                out[row_base + j] += sign * row[j];
+            }
+        }
+
+        for j in 0..head_dim {
+            out[row_base + j] *= scale;
+        }
+    }
+
+    out
+}
+
 /// Compress using full f16 (no direction quantization, just f32 → f16).
 fn full_compress(data: &[f32]) -> Vec<u8> {
     let mut out = vec![0u8; data.len() * 2];
@@ -528,7 +660,7 @@ impl<B: Backend> AttentionCache<B> for CompressedKvCache<B> {
         }
 
         // Compress and append
-        match self.method {
+        match &self.method {
             KvQuantMethod::Full => {
                 layer.k_bytes.extend(full_compress(&k_new));
                 layer.v_bytes.extend(full_compress(&v_new));
@@ -539,6 +671,16 @@ impl<B: Backend> AttentionCache<B> for CompressedKvCache<B> {
                 layer.k_bytes.extend(polar_quant_compress(&k_new, head_dim));
                 layer.v_bytes.extend(polar_quant_compress(&v_new, head_dim));
             }
+            KvQuantMethod::QJL { projection_dim } => {
+                let proj_dim = *projection_dim;
+                let proj = self.projection.as_deref().expect("QJL projection matrix");
+                layer
+                    .k_bytes
+                    .extend(qjl_compress(&k_new, head_dim, proj, proj_dim));
+                layer
+                    .v_bytes
+                    .extend(qjl_compress(&v_new, head_dim, proj, proj_dim));
+            }
         }
 
         layer.seq_len += new_seq;
@@ -548,13 +690,23 @@ impl<B: Backend> AttentionCache<B> for CompressedKvCache<B> {
         let num_vecs = batch * num_heads * total_seq;
         let total_elems = num_vecs * head_dim;
 
-        let k_full_f32: Vec<f32> = match self.method {
+        let k_full_f32: Vec<f32> = match &self.method {
             KvQuantMethod::Full => full_decompress(&layer.k_bytes, total_elems),
             KvQuantMethod::PolarQuant => polar_quant_decompress(&layer.k_bytes, num_vecs, head_dim),
+            KvQuantMethod::QJL { projection_dim } => {
+                let proj_dim = *projection_dim;
+                let proj = self.projection.as_deref().expect("QJL projection matrix");
+                qjl_decompress(&layer.k_bytes, num_vecs, head_dim, proj, proj_dim)
+            }
         };
-        let v_full_f32: Vec<f32> = match self.method {
+        let v_full_f32: Vec<f32> = match &self.method {
             KvQuantMethod::Full => full_decompress(&layer.v_bytes, total_elems),
             KvQuantMethod::PolarQuant => polar_quant_decompress(&layer.v_bytes, num_vecs, head_dim),
+            KvQuantMethod::QJL { projection_dim } => {
+                let proj_dim = *projection_dim;
+                let proj = self.projection.as_deref().expect("QJL projection matrix");
+                qjl_decompress(&layer.v_bytes, num_vecs, head_dim, proj, proj_dim)
+            }
         };
 
         let k_full = Tensor::<B, 1>::from_data(
@@ -688,5 +840,38 @@ mod tests {
         cache.reset();
 
         assert_eq!(cache.seq_len(), 0);
+    }
+
+    #[test]
+    fn test_qjl_compressed_kv_cache_shape() {
+        let device = Default::default();
+        // head_dim=32, proj_dim=8 (head_dim/4)
+        let mut cache = CompressedKvCache::<TestBackend>::new(
+            2,
+            4,
+            32,
+            KvQuantMethod::QJL { projection_dim: 8 },
+        );
+
+        let k1 = Tensor::ones([1, 4, 3, 32], &device);
+        let v1 = Tensor::ones([1, 4, 3, 32], &device);
+        let update = cache.update_layer(0, k1, v1);
+        assert_eq!(update.k.dims(), [1, 4, 3, 32]);
+        assert_eq!(update.v.dims(), [1, 4, 3, 32]);
+        assert_eq!(cache.seq_len(), 3);
+
+        let k2 = Tensor::ones([1, 4, 2, 32], &device);
+        let v2 = Tensor::ones([1, 4, 2, 32], &device);
+        let update2 = cache.update_layer(0, k2, v2);
+        assert_eq!(update2.k.dims(), [1, 4, 5, 32]);
+        assert_eq!(update2.v.dims(), [1, 4, 5, 32]);
+        assert_eq!(cache.seq_len(), 5);
+    }
+
+    #[test]
+    fn test_qjl_compression_ratio() {
+        // head_dim=64, proj_dim=16: (2 + 16/8) / (64*2) = 4/128 = 0.03125
+        let ratio = KvQuantMethod::QJL { projection_dim: 16 }.compression_ratio(64);
+        assert!((ratio - 4.0 / 128.0).abs() < 1e-9);
     }
 }

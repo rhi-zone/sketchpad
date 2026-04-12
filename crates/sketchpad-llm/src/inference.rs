@@ -33,6 +33,8 @@ use crate::{
     gemma4::{Gemma4, Gemma4Config, Gemma4Runtime},
     gemma4_gguf_loader::load_gemma4_gguf,
     gemma4_loader::load_gemma4,
+    griffin::{Griffin, GriffinConfig, GriffinRuntime},
+    griffin_loader::load_griffin,
     jamba::{Jamba, JambaConfig, JambaRuntime},
     jamba_loader::load_jamba,
     llama::{Llama, LlamaConfig, LlamaRuntime},
@@ -96,6 +98,8 @@ pub enum ModelType {
     Mamba,
     /// Jamba hybrid
     Jamba,
+    /// Griffin / Hawk (RecurrentGemma)
+    Griffin,
 }
 
 impl std::str::FromStr for ModelType {
@@ -114,6 +118,7 @@ impl std::str::FromStr for ModelType {
             "rwkv" => Ok(Self::Rwkv),
             "mamba" => Ok(Self::Mamba),
             "jamba" => Ok(Self::Jamba),
+            "griffin" | "hawk" | "recurrentgemma" => Ok(Self::Griffin),
             _ => Err(()),
         }
     }
@@ -134,6 +139,7 @@ impl ModelType {
             Self::Rwkv => "rwkv",
             Self::Mamba => "mamba",
             Self::Jamba => "jamba",
+            Self::Griffin => "griffin",
         }
     }
 }
@@ -223,6 +229,7 @@ enum ModelInstance<B: Backend> {
     Rwkv(Rwkv<B>, RwkvRuntime<B>),
     Mamba(Mamba<B>, MambaRuntime<B>),
     Jamba(Jamba<B>, JambaRuntime<B>),
+    Griffin(Griffin<B>, GriffinRuntime<B>),
 }
 
 /// Unified LLM instance that can load and run any supported model
@@ -382,6 +389,12 @@ impl<B: Backend> LlmInstance<B> {
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::Jamba(model, runtime))
             }
+            ModelType::Griffin => {
+                let config = parse_griffin_config(&config_str)?;
+                let (model, runtime) = load_griffin(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Griffin(model, runtime))
+            }
         }
     }
 
@@ -496,6 +509,7 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Rwkv(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Mamba(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Jamba(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Griffin(m, _) => m.embed_tokens.weight.val().device(),
         }
     }
 
@@ -594,6 +608,16 @@ impl<B: Backend> LlmInstance<B> {
             }
             ModelInstance::Jamba(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::Griffin(model, runtime) => {
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
         }
     }
@@ -832,6 +856,36 @@ fn parse_mamba_config(json: &str) -> Result<MambaConfig, LlmError> {
             .map(|x| x as usize)
             .unwrap_or_else(|| d_model.div_ceil(16)),
         layer_norm_eps: v["layer_norm_eps"].as_f64().unwrap_or(1e-5),
+    })
+}
+
+fn parse_griffin_config(json: &str) -> Result<GriffinConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(2560) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(10) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    Ok(GriffinConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(256000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(26) as usize,
+        d_model,
+        d_conv: v["lru_width"].as_u64().unwrap_or(d_model as u64) as usize,
+        num_heads,
+        head_dim,
+        window_size: v["attention_window_size"].as_u64().unwrap_or(2048) as usize,
+        intermediate_size: v["intermediate_size"].as_u64().unwrap_or(7680) as usize,
+        attn_layer_offset: v["attention_layers_idx"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|x| x.as_u64())
+            .map(|x| x as usize)
+            .unwrap_or(5),
+        attn_layer_period: v["attention_layer_period"].as_u64().unwrap_or(6) as usize,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
     })
 }
 
