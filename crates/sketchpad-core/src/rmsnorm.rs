@@ -4,6 +4,7 @@
 //! Qwen, and DiT-based models. Simpler and faster than LayerNorm.
 
 use burn::prelude::*;
+use burn::tensor::DType;
 
 /// Root Mean Square Layer Normalization
 ///
@@ -79,10 +80,13 @@ impl<B: Backend> RmsNorm<B> {
     /// Normalized tensor with same shape as input
     pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
         let last_dim = D - 1;
-        // Compute mean of squared values
-        let mean_sq = x.clone().powf_scalar(2.0).mean_dim(last_dim);
-        // RMS normalization
-        let x_norm = x / (mean_sq + self.eps).sqrt();
+        // For f16/bf16, squaring and summing can overflow (f16 max ~65504).
+        // Compute the RMS norm in f32, then cast back.
+        let original_dtype = x.dtype();
+        let x_f32 = x.cast(DType::F32);
+        let mean_sq = x_f32.clone().powf_scalar(2.0).mean_dim(last_dim);
+        let x_norm = x_f32 / (mean_sq + self.eps).sqrt();
+        let x_norm = x_norm.cast(original_dtype);
         // Apply learned scale
         x_norm * self.weight.clone().unsqueeze()
     }

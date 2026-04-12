@@ -83,3 +83,4 @@ pub mod transformer;
 pub mod vae3d;
 
 pub use kv_cache::{CompressedKvCache, KvCacheConfig, KvQuantMethod};
+pub use precision::Upcasted;

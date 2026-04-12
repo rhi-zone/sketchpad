@@ -70,32 +70,22 @@ impl<B: Backend> GroupNorm<B> {
         // Reshape to [batch, num_groups, group_size * height * width]
         let x = x.reshape([batch, self.num_groups, group_size * height * width]);
 
-        // For f16/bf16, variance computation can overflow in large reductions.
-        // We compute variance using a numerically stable two-pass algorithm
-        // that divides by N progressively to keep values in range.
-
-        // Compute mean using stable algorithm (sum/N element-wise to avoid overflow)
-        // Instead of sum_dim followed by divide, we use mean_dim which internally
-        // should handle this better. But mean_dim also fails on cubecl f16.
-
-        // Workaround: compute mean and var in f32, then cast back
+        // For f16/bf16, mean and variance computation can overflow (f16 max ~65504).
+        // Compute the entire normalization pass in f32, then cast back.
         use burn::tensor::DType;
         let original_dtype = x.dtype();
-        let x_f32 = x.clone().cast(DType::F32);
+        let x_f32 = x.cast(DType::F32);
         let mean_f32 = x_f32.clone().mean_dim(2);
-        let mean_expanded_f32 = mean_f32.clone().unsqueeze::<3>();
-        let diff_f32 = x_f32 - mean_expanded_f32.clone();
-        let var_f32 = (diff_f32.clone() * diff_f32).mean_dim(2);
-
-        // Cast back to original dtype
-        let mean_expanded = mean_expanded_f32.cast(original_dtype);
-        let var = var_f32.cast(original_dtype);
+        let mean_expanded_f32 = mean_f32.unsqueeze::<3>();
+        let diff_f32 = x_f32 - mean_expanded_f32;
+        let var_f32 = (diff_f32.clone() * diff_f32.clone()).mean_dim(2);
 
         // Expand var for broadcasting
-        let var = var.unsqueeze::<3>(); // [batch, num_groups, 1]
+        let var_f32 = var_f32.unsqueeze::<3>(); // [batch, num_groups, 1]
 
-        // Normalize
-        let x = (x - mean_expanded) / (var + self.eps).sqrt();
+        // Normalize entirely in f32, then cast back
+        let x_f32 = diff_f32 / (var_f32 + self.eps).sqrt();
+        let x = x_f32.cast(original_dtype);
 
         // Reshape back to [batch, channels, height, width]
         let x = x.reshape([batch, channels, height, width]);

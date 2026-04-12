@@ -16,6 +16,46 @@
 //! The types in this module are for **configuration** purposes - to specify what
 //! precision you want when loading models or selecting backends. They do NOT
 //! perform runtime precision conversion (which would require backend support).
+//!
+//! # Runtime upcasting
+//!
+//! [`Upcasted`] wraps a `Linear<B>` layer to upcast inputs to f32 before the
+//! matmul, then downcast the output back. This prevents f16 overflow in large
+//! matmul reductions where intermediate sums can exceed the f16 range (~65504).
+
+use burn::nn::Linear;
+use burn::prelude::*;
+use burn::tensor::DType;
+
+/// Wraps a [`Linear`] layer to upcast inputs to f32 before the matmul, then
+/// downcast the output back to the original dtype.
+///
+/// This prevents f16 overflow in large matmul reductions, where partial sums
+/// can exceed the f16 range (~65504). The pattern is:
+///
+/// ```text
+/// input (f16) → cast(f32) → Linear → cast(f16) → output
+/// ```
+///
+/// Use this in place of bare `Linear<B>` at sites where f16 overflow has been
+/// observed (e.g. attention projections, large feed-forward layers).
+pub struct Upcasted<B: Backend> {
+    inner: Linear<B>,
+}
+
+impl<B: Backend> Upcasted<B> {
+    /// Wraps an existing `Linear` layer.
+    pub fn new(inner: Linear<B>) -> Self {
+        Self { inner }
+    }
+
+    /// Applies the linear layer with f32 upcasting.
+    pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {
+        let original_dtype = x.dtype();
+        let out = self.inner.forward(x.cast(DType::F32));
+        out.cast(original_dtype)
+    }
+}
 
 /// Precision mode for inference
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
