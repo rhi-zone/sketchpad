@@ -54,14 +54,15 @@
         # Requires AMD GPU with ROCm kernel driver (/dev/kfd)
         devShells.rocm = pkgs.mkShell rec {
           buildInputs = commonBuildInputs ++ (with pkgs.rocmPackages; [
-            rocm-runtime   # libamdhip64.so, hip headers
-            rocminfo
+            clr          # libamdhip64.so + libhiprtc.so (HIP runtime + RTC)
+            hipcc        # hipconfig binary (required by cubecl-hip-sys build.rs)
+            rocm-runtime # libhsa-runtime64.so (HSA runtime, needed at runtime)
           ]);
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs
             + ":$LD_LIBRARY_PATH";
           NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
-          # Tell cubecl-hip-sys where to find ROCm
-          ROCM_PATH = pkgs.rocmPackages.rocm-runtime;
+          # cubecl-hip-sys build.rs checks HIP_PATH (or ROCM_PATH) to find libraries
+          HIP_PATH = pkgs.rocmPackages.clr;
         };
       }
     );

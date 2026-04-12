@@ -495,6 +495,10 @@ When PR is merged and released to crates.io, update cubek dependency and remove 
 
 ## Backlog
 
+### SD Image Generation Backends
+
+- **SDXL: wire flash_attention / low_vram / vae_clamp for ROCm and wgpu paths** — currently only connected in the CUDA dispatch; the other backends silently ignore these flags (`run_sdxl_generate` in `main.rs`)
+
 ### Memory Optimization
 
 - **Smart offloading**: Implement CPU/GPU memory management for large models
