@@ -32,6 +32,19 @@
         # (libdrm_amdgpu.so, radeon_icd.x86_64.json, nvidia_icd.json, etc.)
         vulkanInputs = with pkgs; [ vulkan-loader vulkan-headers ];
         vulkanLibPath = "/run/opengl-driver/lib";
+
+        # Unified ROCm tree — amd_comgr looks for $ROCM_PATH/amdgcn/bitcode/ at init.
+        # rocmPackages.rocmPath was removed; build an equivalent with symlinkJoin.
+        rocmCombined = pkgs.symlinkJoin {
+          name = "rocm-combined";
+          paths = with pkgs.rocmPackages; [
+            clr           # libamdhip64.so, libhiprtc.so
+            hipcc         # hipconfig
+            rocm-runtime  # libhsa-runtime64.so
+            rocm-comgr    # libamd_comgr.so
+            rocm-device-libs  # amdgcn/bitcode/*.bc (required by amd_comgr at init)
+          ];
+        };
       in
       {
         # Default shell without GPU dependencies
@@ -60,17 +73,15 @@
         # ROCm note: libamd_comgr JIT-compiles GPU kernels and can crash on init
         # if the system ROCm stack is incomplete; wgpu is a reliable fallback.
         devShells.amd = pkgs.mkShell rec {
-          buildInputs = commonBuildInputs ++ vulkanInputs ++ (with pkgs.rocmPackages; [
-            clr          # libamdhip64.so + libhiprtc.so (HIP runtime + RTC)
-            hipcc        # hipconfig binary (required by cubecl-hip-sys build.rs)
-            rocm-runtime # libhsa-runtime64.so (HSA runtime, needed at runtime)
-          ]);
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs
+          buildInputs = commonBuildInputs ++ vulkanInputs ++ [ rocmCombined ];
+          LD_LIBRARY_PATH = "${rocmCombined}/lib"
+            + ":${pkgs.lib.makeLibraryPath (commonBuildInputs ++ vulkanInputs)}"
             + ":${vulkanLibPath}"  # System AMDGPU driver (libdrm_amdgpu.so, Vulkan ICD)
             + ":$LD_LIBRARY_PATH";
           NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
-          # cubecl-hip-sys build.rs checks HIP_PATH to find libraries
-          HIP_PATH = pkgs.rocmPackages.clr;
+          # Point ROCm components to the merged tree so amd_comgr finds amdgcn/bitcode/
+          ROCM_PATH = rocmCombined;
+          HIP_PATH = rocmCombined;
         };
 
         # Keep .#rocm as an alias for backwards compatibility
