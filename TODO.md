@@ -423,10 +423,10 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 - [x] SANA - NVIDIA's linear DiT, 32x compression, 4K images on laptop GPU in <1s
 
 #### Experimental / Research (Lower Priority)
-- [ ] xLSTM - Extended LSTM with exponential gating and matrix memory (Sepp Hochreiter)
+- [x] xLSTM - sLSTM (exponential gates + normalizer stabilizer) and mLSTM (matrix memory C∈ℝ^{d_v×d_k}) cells
 - [ ] Zamba/Zamba2 - Zyphra's Mamba backbone + shared attention layers
-- [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU cells, local attention interleaving, Hawk variant (recurrence-only)
-- [ ] RetNet - Microsoft's retentive network, parallel/recurrent/chunkwise modes
+- [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU + local attention
+- [x] RetNet - Microsoft's retentive network — recurrent mode, S_t = γ·S_{t-1} + k⊗v
 - [ ] Hyena/StripedHyena - Long convolutions + gating, subquadratic attention
 - [ ] TTT (Test-Time Training) - Hidden state updated via gradient descent during inference
 - [ ] LLaDA - Large Language Diffusion with Masking, bidirectional diffusion LM
