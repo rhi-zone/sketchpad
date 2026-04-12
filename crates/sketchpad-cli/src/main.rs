@@ -447,7 +447,15 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
                 run_llm_command_with_backend::<Backend>(command, &device)
             }
 
-            #[cfg(all(feature = "ndarray", not(feature = "wgpu")))]
+            #[cfg(all(feature = "rocm", not(feature = "wgpu")))]
+            {
+                use burn_rocm::Rocm;
+                type Backend = Rocm<f32>;
+                let device = Default::default();
+                run_llm_command_with_backend::<Backend>(command, &device)
+            }
+
+            #[cfg(all(feature = "ndarray", not(feature = "wgpu"), not(feature = "rocm")))]
             {
                 use burn_ndarray::NdArray;
                 type Backend = NdArray<f32>;
@@ -455,10 +463,10 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
                 run_llm_command_with_backend::<Backend>(command, &device)
             }
 
-            #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
+            #[cfg(not(any(feature = "wgpu", feature = "rocm", feature = "ndarray")))]
             {
                 let _ = command;
-                anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
+                anyhow::bail!("No backend enabled. Enable 'wgpu', 'rocm', or 'ndarray' feature.")
             }
         }
     }
@@ -542,9 +550,75 @@ fn run_gguf_command(params: llm::GgufRunParams, precision: Precision) -> Result<
         }
     }
 
+    #[cfg(all(feature = "rocm", not(feature = "wgpu")))]
+    {
+        use burn_rocm::Rocm;
+        use cubecl::hip::HipRuntime;
+        let device = Default::default();
+
+        #[cfg(feature = "cubecl")]
+        {
+            use sketchpad_convert::gguf::{GgmlType, GgufFile};
+            let path = params.weights.to_str().context("Invalid path")?;
+            let is_gpu_quant_type = GgufFile::open(path)
+                .ok()
+                .and_then(|f| f.tensor_info("blk.0.attn_q.weight").map(|i| i.ggml_type))
+                .is_some_and(GgmlType::is_gpu_quant_supported);
+
+            if is_gpu_quant_type {
+                return match precision {
+                    #[cfg(feature = "precision-f16")]
+                    Precision::F16 => {
+                        use half::f16;
+                        llm::run_gguf_gpu_quant::<HipRuntime, f16, i32, u32>(
+                            params,
+                            burn::tensor::DType::F16,
+                            &device,
+                        )
+                    }
+                    #[cfg(feature = "precision-bf16")]
+                    Precision::Bf16 => {
+                        use half::bf16;
+                        llm::run_gguf_gpu_quant::<HipRuntime, bf16, i32, u32>(
+                            params,
+                            burn::tensor::DType::BF16,
+                            &device,
+                        )
+                    }
+                    #[cfg(feature = "precision-f32")]
+                    Precision::F32 => llm::run_gguf_gpu_quant::<HipRuntime, f32, i32, u32>(
+                        params,
+                        burn::tensor::DType::F32,
+                        &device,
+                    ),
+                };
+            }
+        }
+
+        match precision {
+            #[cfg(feature = "precision-f32")]
+            Precision::F32 => {
+                type B = Rocm<f32>;
+                llm::run_gguf::<B>(params, &device)
+            }
+            #[cfg(feature = "precision-f16")]
+            Precision::F16 => {
+                use half::f16;
+                type B = Rocm<f16>;
+                llm::run_gguf::<B>(params, &device)
+            }
+            #[cfg(feature = "precision-bf16")]
+            Precision::Bf16 => {
+                use half::bf16;
+                type B = Rocm<bf16>;
+                llm::run_gguf::<B>(params, &device)
+            }
+        }
+    }
+
     // CPU fallback: NdArray is f32-only regardless of precision setting.
     // Quantized GGUFs are automatically CPU-offloaded inside run_gguf.
-    #[cfg(all(feature = "ndarray", not(feature = "wgpu")))]
+    #[cfg(all(feature = "ndarray", not(feature = "wgpu"), not(feature = "rocm")))]
     {
         use burn_ndarray::NdArray;
         type B = NdArray<f32>;
@@ -552,10 +626,10 @@ fn run_gguf_command(params: llm::GgufRunParams, precision: Precision) -> Result<
         llm::run_gguf::<B>(params, &device)
     }
 
-    #[cfg(not(any(feature = "wgpu", feature = "ndarray")))]
+    #[cfg(not(any(feature = "wgpu", feature = "rocm", feature = "ndarray")))]
     {
         let _ = (params, precision);
-        anyhow::bail!("No backend enabled. Enable 'wgpu' or 'ndarray' feature.")
+        anyhow::bail!("No backend enabled. Enable 'wgpu', 'rocm', or 'ndarray' feature.")
     }
 }
 

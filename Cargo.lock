@@ -5689,6 +5689,7 @@ dependencies = [
  "anyhow",
  "burn",
  "burn-cubecl",
+ "burn-rocm",
  "clap",
  "cubecl",
  "half",

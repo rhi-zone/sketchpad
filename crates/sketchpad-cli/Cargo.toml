@@ -17,6 +17,7 @@ path = "src/bin/inspect-safetensors.rs"
 [features]
 default = ["wgpu", "cpu", "cubecl", "precision-all"]
 # For NVIDIA GPUs, build with: cargo build --features cuda
+# For AMD GPUs,   build with: cargo build --no-default-features --features rocm,cpu,precision-all
 
 # Backend features - use burn's own feature flags
 cpu = ["burn/cpu"]
@@ -24,6 +25,7 @@ ndarray = ["burn/ndarray"]
 tch = ["burn/tch"]
 wgpu = ["burn/wgpu"]
 cuda = ["burn/cuda"]
+rocm = ["burn-rocm", "dep:cubecl", "cubecl/hip", "sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl"]
 
 # CubeCL acceleration (flash attention for f16/bf16) - enabled by default
 cubecl = ["sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl", "dep:cubecl"]
@@ -62,6 +64,7 @@ half = "2"
 # CubeCL dependencies (optional, for flash attention)
 burn-cubecl = { workspace = true, optional = true }
 cubecl = { version = "0.9.0-pre.6", optional = true, features = ["cuda", "wgpu"] }
+burn-rocm = { version = "0.20.0-pre.6", optional = true }
 
 # Serve dependencies (optional)
 tokio = { version = "1", features = ["full"], optional = true }
