@@ -415,18 +415,28 @@ fn run_llm_command(command: llm::LlmCommands) -> Result<()> {
             precision,
             vram,
             kv_quant,
-        } => run_gguf_command(
-            llm::GgufRunParams {
-                weights,
-                prompt,
-                max_tokens,
-                temperature,
-                top_p,
-                vram_gb: vram,
-                kv_quant_ratio: if kv_quant { 0.25 } else { 1.0 },
-            },
-            precision,
-        ),
+        } => {
+            use sketchpad_core::kv_cache::{KvCacheConfig, KvQuantMethod};
+            run_gguf_command(
+                llm::GgufRunParams {
+                    weights,
+                    prompt,
+                    max_tokens,
+                    temperature,
+                    top_p,
+                    vram_gb: vram,
+                    kv_quant_ratio: if kv_quant { 0.25 } else { 1.0 },
+                    kv_cache_config: if kv_quant {
+                        KvCacheConfig::Compressed {
+                            method: KvQuantMethod::PolarQuant,
+                        }
+                    } else {
+                        KvCacheConfig::Standard
+                    },
+                },
+                precision,
+            )
+        }
         command => {
             // Non-GGUF LLM commands use f32; GGUF has its own precision dispatch above
             #[cfg(feature = "wgpu")]
@@ -590,6 +600,18 @@ fn run_llm_command_with_backend<B: burn::prelude::Backend>(
             weights,
             host,
             port,
+        } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(llm::run_serve::<B>(model, weights, host, port, device))
+        }
+
+        #[cfg(feature = "llm-serve")]
+        llm::LlmCommands::ServeAnthropic {
+            model,
+            weights,
+            host,
+            port,
+            precision: _,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(llm::run_serve::<B>(model, weights, host, port, device))

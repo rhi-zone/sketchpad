@@ -82,4 +82,4 @@ pub mod textual_inversion;
 pub mod transformer;
 pub mod vae3d;
 
-pub use kv_cache::{CompressedKvCache, KvQuantMethod};
+pub use kv_cache::{CompressedKvCache, KvCacheConfig, KvQuantMethod};

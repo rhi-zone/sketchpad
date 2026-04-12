@@ -19,6 +19,7 @@
 use burn::prelude::*;
 use burn_ndarray::NdArray;
 use sketchpad_convert::gguf::{GgufFile, MetadataValue};
+use sketchpad_core::kv_cache::KvCacheConfig;
 use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
 use sketchpad_llm::gemma4_gguf_loader::load_gemma4_gguf;
 use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
@@ -88,10 +89,12 @@ fn main() {
             }
 
             let gen_start = std::time::Instant::now();
+            let mut cache = runtime.create_kv_cache(&KvCacheConfig::Standard);
             let output_ids = model.generate(
                 input_ids,
                 &runtime,
                 max_tokens,
+                cache.as_mut(),
                 &sketchpad_llm::sampling::SamplerConfig {
                     temperature: 0.7,
                     ..sketchpad_llm::sampling::SamplerConfig::greedy()
@@ -127,7 +130,9 @@ fn main() {
             };
 
             let gen_start = std::time::Instant::now();
-            let output_ids = model.generate(input_ids, &runtime, max_tokens, &sampler);
+            let mut cache = runtime.create_kv_cache(&KvCacheConfig::Standard);
+            let output_ids =
+                model.generate(input_ids, &runtime, max_tokens, cache.as_mut(), &sampler);
             let elapsed = gen_start.elapsed().as_secs_f64();
 
             let all_ids: Vec<i32> = output_ids.to_data().to_vec().unwrap();

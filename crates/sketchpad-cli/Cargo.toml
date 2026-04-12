@@ -44,6 +44,7 @@ llm-serve = ["sketchpad-llm/serve", "tokio"]
 [dependencies]
 burn = { workspace = true }
 sketchpad = { path = "../sketchpad" }
+sketchpad-core = { path = "../sketchpad-core" }
 sketchpad-llm = { path = "../sketchpad-llm" }
 sketchpad-convert = { path = "../sketchpad-convert" }
 sketchpad-clip = { path = "../sketchpad-clip" }

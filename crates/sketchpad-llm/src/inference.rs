@@ -21,6 +21,7 @@ use std::path::Path;
 
 use burn::prelude::*;
 use serde::{Deserialize, Serialize};
+use sketchpad_core::kv_cache::KvCacheConfig;
 use thiserror::Error;
 use tokenizers::Tokenizer;
 
@@ -147,6 +148,9 @@ pub struct GenerationConfig {
     pub sampler: crate::sampling::SamplerConfig,
     /// Stop sequences - generation stops when any of these are produced
     pub stop_sequences: Vec<String>,
+    /// KV cache strategy (standard concat or compressed)
+    #[serde(skip)]
+    pub kv_cache: KvCacheConfig,
 }
 
 impl Default for GenerationConfig {
@@ -155,6 +159,7 @@ impl Default for GenerationConfig {
             max_tokens: 256,
             sampler: crate::sampling::SamplerConfig::default(),
             stop_sequences: Vec::new(),
+            kv_cache: KvCacheConfig::Standard,
         }
     }
 }
@@ -195,6 +200,12 @@ impl GenerationConfig {
     /// Set stop sequences
     pub fn with_stop_sequences(mut self, stops: Vec<String>) -> Self {
         self.stop_sequences = stops;
+        self
+    }
+
+    /// Set the KV cache strategy
+    pub fn with_kv_cache(mut self, kv_cache: KvCacheConfig) -> Self {
+        self.kv_cache = kv_cache;
         self
     }
 }
@@ -496,28 +507,84 @@ impl<B: Backend> LlmInstance<B> {
     ) -> Tensor<B, 2, Int> {
         match &self.model {
             ModelInstance::Llama(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Gemma4(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Mistral(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Mixtral(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Gemma(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Phi(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Qwen(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::DeepSeek(model, runtime) => {
-                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
             ModelInstance::Rwkv(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)

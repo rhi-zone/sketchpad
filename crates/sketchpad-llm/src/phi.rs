@@ -21,7 +21,9 @@
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
 
-use sketchpad_core::kv_cache::{AttentionCache, CacheUpdate, ModelKvCache};
+use sketchpad_core::kv_cache::{
+    AttentionCache, CacheUpdate, CompressedKvCache, KvCacheConfig, ModelKvCache,
+};
 use sketchpad_core::rmsnorm::RmsNorm;
 use sketchpad_core::rope::RotaryEmbedding;
 use sketchpad_core::transformer::causal_mask;
@@ -473,6 +475,25 @@ pub struct PhiRuntime<B: Backend> {
     pub config: PhiConfig,
 }
 
+impl<B: Backend> PhiRuntime<B> {
+    /// Create a KV cache according to the given config
+    pub fn create_kv_cache(&self, config: &KvCacheConfig) -> Box<dyn AttentionCache<B>> {
+        let head_dim = self.config.hidden_size / self.config.num_heads;
+        match config {
+            KvCacheConfig::Standard => Box::new(ModelKvCache::<B>::new(
+                self.config.num_layers,
+                self.config.max_seq_len,
+            )),
+            KvCacheConfig::Compressed { method } => Box::new(CompressedKvCache::<B>::new(
+                self.config.num_layers,
+                self.config.num_kv_heads,
+                head_dim,
+                method.clone(),
+            )),
+        }
+    }
+}
+
 /// Output from the Phi model
 pub struct PhiOutput<B: Backend> {
     pub logits: Tensor<B, 3>,
@@ -541,18 +562,17 @@ impl<B: Backend> Phi<B> {
         input_ids: Tensor<B, 2, Int>,
         runtime: &PhiRuntime<B>,
         max_new_tokens: usize,
+        cache: &mut dyn AttentionCache<B>,
         sampler: &crate::sampling::SamplerConfig,
     ) -> Tensor<B, 2, Int> {
         let [batch, _prompt_len] = input_ids.dims();
-        let mut cache =
-            ModelKvCache::<B>::new(runtime.config.num_layers, runtime.config.max_seq_len);
 
         // Track generated token IDs for repetition/DRY penalties
         let input_data: Vec<i64> = input_ids.to_data().to_vec().unwrap();
         let mut context_tokens: Vec<u32> = input_data.iter().map(|&id| id as u32).collect();
 
         // Prefill: process the entire prompt at once
-        let output = self.forward(input_ids.clone(), runtime, Some(&mut cache));
+        let output = self.forward(input_ids.clone(), runtime, Some(cache));
 
         let seq_len = input_ids.dims()[1];
         let last_logits = output.logits.slice([
@@ -570,7 +590,7 @@ impl<B: Backend> Phi<B> {
 
         // Decode: generate one token at a time using the cache
         for _ in 1..max_new_tokens {
-            let output = self.forward(next_token, runtime, Some(&mut cache));
+            let output = self.forward(next_token, runtime, Some(cache));
 
             let last_logits = output
                 .logits
@@ -633,15 +653,19 @@ mod tests {
 
     #[test]
     fn test_phi_generate() {
+        use sketchpad_core::kv_cache::KvCacheConfig;
+
         let device = Default::default();
         let config = PhiConfig::tiny();
         let (model, runtime) = config.init::<TestBackend>(&device);
 
         let prompt = Tensor::<TestBackend, 2, Int>::from_ints([[1, 2]], &device);
+        let mut cache = runtime.create_kv_cache(&KvCacheConfig::Standard);
         let generated = model.generate(
             prompt,
             &runtime,
             3,
+            cache.as_mut(),
             &crate::sampling::SamplerConfig::greedy(),
         );
 

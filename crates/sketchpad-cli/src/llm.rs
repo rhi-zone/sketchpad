@@ -10,6 +10,7 @@ use burn::prelude::*;
 use clap::{Subcommand, ValueEnum};
 
 use sketchpad_convert::gguf::{GgufFile, MetadataValue};
+use sketchpad_core::kv_cache::KvCacheConfig;
 use sketchpad_llm::gemma_gguf_loader::load_gemma_gguf;
 use sketchpad_llm::gemma4_gguf_loader::{load_gemma4_gguf, load_gemma4_gguf_offloaded};
 use sketchpad_llm::gguf_tokenizer::{self, ChatMessage};
@@ -179,6 +180,30 @@ pub enum LlmCommands {
         #[arg(long, default_value = "8080")]
         port: u16,
     },
+
+    /// Start an Anthropic Messages API-compatible HTTP server (POST /v1/messages)
+    #[cfg(feature = "llm-serve")]
+    ServeAnthropic {
+        /// Model type
+        #[arg(short, long, value_enum)]
+        model: LlmModelType,
+
+        /// Path to model weights directory or file
+        #[arg(short, long)]
+        weights: PathBuf,
+
+        /// Host address to bind
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Port to bind
+        #[arg(long, default_value = "8080")]
+        port: u16,
+
+        /// Float precision for model weights and activations
+        #[arg(long, value_enum, default_value = "bf16")]
+        precision: crate::Precision,
+    },
 }
 
 /// Run the generate command
@@ -276,6 +301,8 @@ pub struct GgufRunParams {
     /// KV cache compression ratio for VRAM budget estimation.
     /// `1.0` = no compression; `0.25` = PolarQuant 4-bit (~4x reduction).
     pub kv_quant_ratio: f64,
+    /// KV cache strategy used during generation.
+    pub kv_cache_config: KvCacheConfig,
 }
 
 /// Loading strategy selected based on model size and available VRAM.
@@ -418,6 +445,7 @@ pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result
         top_p,
         vram_gb,
         kv_quant_ratio,
+        kv_cache_config,
     } = params;
     let path = weights.to_str().context("Invalid path")?;
     let input = load_gguf_input(path, &prompt, vram_gb, false, max_tokens, kv_quant_ratio)?;
@@ -438,10 +466,12 @@ pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result
             eprintln!("Loaded in {:.1}s", start.elapsed().as_secs_f64());
 
             let t = std::time::Instant::now();
+            let mut cache = runtime.create_kv_cache(&kv_cache_config);
             let out = model.generate(
                 input_ids,
                 &runtime,
                 max_tokens,
+                cache.as_mut(),
                 &SamplerConfig {
                     temperature,
                     ..SamplerConfig::greedy()
@@ -475,7 +505,8 @@ pub fn run_gguf<B: Backend>(params: GgufRunParams, device: &B::Device) -> Result
                 ..SamplerConfig::greedy()
             };
             let t = std::time::Instant::now();
-            let out = model.generate(input_ids, &runtime, max_tokens, &sampler);
+            let mut cache = runtime.create_kv_cache(&kv_cache_config);
+            let out = model.generate(input_ids, &runtime, max_tokens, cache.as_mut(), &sampler);
             let elapsed = t.elapsed().as_secs_f64();
             let all: Vec<i32> = out.to_data().to_vec().unwrap();
             let n = all.len() - input.seq_len;
@@ -551,7 +582,14 @@ where
         ..SamplerConfig::greedy()
     };
     let t = std::time::Instant::now();
-    let out = model.generate(input_ids, &runtime, params.max_tokens, &sampler);
+    let mut cache = runtime.create_kv_cache(&params.kv_cache_config);
+    let out = model.generate(
+        input_ids,
+        &runtime,
+        params.max_tokens,
+        cache.as_mut(),
+        &sampler,
+    );
     let elapsed = t.elapsed().as_secs_f64();
     let all: Vec<i32> = out.to_data().to_vec().unwrap();
     let n = all.len() - input.seq_len;

@@ -287,7 +287,18 @@ impl<B: Backend> StaticKvCache<B> {
     }
 }
 
+/// Configuration for how to create a KV cache
+#[derive(Debug, Clone, Default)]
+pub enum KvCacheConfig {
+    /// Standard concat-based cache (default)
+    #[default]
+    Standard,
+    /// PolarQuant compressed cache (~4x reduction vs f16)
+    Compressed { method: KvQuantMethod },
+}
+
 /// Quantization method for compressed KV cache storage
+#[derive(Debug, Clone)]
 pub enum KvQuantMethod {
     /// Full precision — no compression, equivalent to ModelKvCache
     Full,
