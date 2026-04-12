@@ -20,6 +20,7 @@
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
+use burn::tensor::DType;
 
 use sketchpad_core::glu::{SwiGluFfn, SwiGluFfnConfig};
 use sketchpad_core::kv_cache::{AttentionCache, CompressedKvCache, KvCacheConfig, ModelKvCache};
@@ -370,9 +371,19 @@ impl<B: Backend> DeepSeekAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         let q = q
             .reshape([batch, seq_len, self.num_heads, self.head_dim])
@@ -403,7 +414,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn forward_standard_cached(
@@ -417,9 +432,19 @@ impl<B: Backend> DeepSeekAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         let q = q
             .reshape([batch, seq_len, self.num_heads, self.head_dim])
@@ -456,7 +481,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn forward_mla(
@@ -472,12 +501,25 @@ impl<B: Backend> DeepSeekAttention<B> {
         let kv_a = self.kv_a_proj_with_mqa.as_ref().unwrap();
         let kv_b = self.kv_b_proj.as_ref().unwrap();
 
-        // Q: compress -> expand
-        let q_compressed = q_a.forward(x.clone());
-        let q = q_b.forward(q_compressed);
+        // Q: compress -> expand — upcast each projection for f16 stability
+        let dtype = x.dtype();
+        let q_compressed = if dtype == DType::F16 {
+            q_a.forward(x.clone().cast(DType::F32)).cast(dtype)
+        } else {
+            q_a.forward(x.clone())
+        };
+        let q = if dtype == DType::F16 {
+            q_b.forward(q_compressed.cast(DType::F32)).cast(dtype)
+        } else {
+            q_b.forward(q_compressed)
+        };
 
         // KV: compress with rope keys, then expand
-        let kv_compressed = kv_a.forward(x);
+        let kv_compressed = if dtype == DType::F16 {
+            kv_a.forward(x.cast(DType::F32)).cast(dtype)
+        } else {
+            kv_a.forward(x)
+        };
 
         // Split compressed KV into latent part and rope keys
         let latent = kv_compressed
@@ -490,7 +532,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         ]);
 
         // Expand latent to get K (nope) and V
-        let kv_expanded = kv_b.forward(latent);
+        let kv_expanded = if dtype == DType::F16 {
+            kv_b.forward(latent.cast(DType::F32)).cast(dtype)
+        } else {
+            kv_b.forward(latent)
+        };
 
         // Split Q into nope and rope parts
         let q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim;
@@ -561,7 +607,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * v_head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn forward_mla_cached(
@@ -579,12 +629,25 @@ impl<B: Backend> DeepSeekAttention<B> {
         let kv_a = self.kv_a_proj_with_mqa.as_ref().unwrap();
         let kv_b = self.kv_b_proj.as_ref().unwrap();
 
-        // Q: compress -> expand
-        let q_compressed = q_a.forward(x.clone());
-        let q = q_b.forward(q_compressed);
+        // Q: compress -> expand — upcast each projection for f16 stability
+        let dtype = x.dtype();
+        let q_compressed = if dtype == DType::F16 {
+            q_a.forward(x.clone().cast(DType::F32)).cast(dtype)
+        } else {
+            q_a.forward(x.clone())
+        };
+        let q = if dtype == DType::F16 {
+            q_b.forward(q_compressed.cast(DType::F32)).cast(dtype)
+        } else {
+            q_b.forward(q_compressed)
+        };
 
         // KV: compress with rope keys, then expand
-        let kv_compressed = kv_a.forward(x);
+        let kv_compressed = if dtype == DType::F16 {
+            kv_a.forward(x.cast(DType::F32)).cast(dtype)
+        } else {
+            kv_a.forward(x)
+        };
 
         // Split compressed KV into latent part and rope keys
         let latent = kv_compressed
@@ -597,7 +660,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         ]);
 
         // Expand latent to get K (nope) and V
-        let kv_expanded = kv_b.forward(latent);
+        let kv_expanded = if dtype == DType::F16 {
+            kv_b.forward(latent.cast(DType::F32)).cast(dtype)
+        } else {
+            kv_b.forward(latent)
+        };
 
         // Split Q into nope and rope parts
         let q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim;
@@ -672,7 +739,11 @@ impl<B: Backend> DeepSeekAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * v_head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {

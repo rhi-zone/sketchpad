@@ -19,6 +19,7 @@
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
+use burn::tensor::DType;
 
 use sketchpad_core::kv_cache::{
     AttentionCache, CacheUpdate, CompressedKvCache, KvCacheConfig, ModelKvCache,
@@ -237,9 +238,19 @@ impl<B: Backend> GemmaAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         let q = q
             .reshape([batch, seq_len, self.num_heads, self.head_dim])
@@ -275,7 +286,11 @@ impl<B: Backend> GemmaAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -291,9 +306,19 @@ impl<B: Backend> GemmaAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         let q = q
             .reshape([batch, seq_len, self.num_heads, self.head_dim])
@@ -332,7 +357,11 @@ impl<B: Backend> GemmaAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {

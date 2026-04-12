@@ -5,6 +5,7 @@
 
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
+use burn::tensor::DType;
 
 use crate::glu::{SwiGluFfn, SwiGluFfnConfig};
 use crate::kv_cache::{AttentionCache, CacheUpdate};
@@ -108,10 +109,20 @@ impl<B: Backend> MultiHeadAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        // Project to Q, K, V
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        // Project to Q, K, V — upcast to f32 for f16 stability
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         // Reshape to [batch, seq_len, num_heads, head_dim]
         let q = q.reshape([batch, seq_len, self.num_heads, self.head_dim]);
@@ -149,7 +160,11 @@ impl<B: Backend> MultiHeadAttention<B> {
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.num_heads * self.head_dim]);
 
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     /// Forward pass with KV cache support
@@ -177,10 +192,20 @@ impl<B: Backend> MultiHeadAttention<B> {
     ) -> Tensor<B, 3> {
         let [batch, seq_len, _hidden] = x.dims();
 
-        // Project to Q, K, V
-        let q = self.q_proj.forward(x.clone());
-        let k = self.k_proj.forward(x.clone());
-        let v = self.v_proj.forward(x);
+        // Project to Q, K, V — upcast to f32 for f16 stability
+        let dtype = x.dtype();
+        let (q, k, v) = if dtype == DType::F16 {
+            let x32 = x.cast(DType::F32);
+            let q = self.q_proj.forward(x32.clone()).cast(dtype);
+            let k = self.k_proj.forward(x32.clone()).cast(dtype);
+            let v = self.v_proj.forward(x32).cast(dtype);
+            (q, k, v)
+        } else {
+            let q = self.q_proj.forward(x.clone());
+            let k = self.k_proj.forward(x.clone());
+            let v = self.v_proj.forward(x);
+            (q, k, v)
+        };
 
         // Reshape to [batch, seq_len, num_heads, head_dim]
         let q = q.reshape([batch, seq_len, self.num_heads, self.head_dim]);
@@ -221,7 +246,11 @@ impl<B: Backend> MultiHeadAttention<B> {
         let out = out.swap_dims(1, 2);
         let out = out.reshape([batch, seq_len, self.num_heads * self.head_dim]);
 
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     /// Repeat KV heads for grouped-query attention

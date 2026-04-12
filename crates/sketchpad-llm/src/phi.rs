@@ -20,6 +20,7 @@
 
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::prelude::*;
+use burn::tensor::DType;
 
 use sketchpad_core::kv_cache::{
     AttentionCache, CacheUpdate, CompressedKvCache, KvCacheConfig, ModelKvCache,
@@ -247,8 +248,13 @@ impl<B: Backend> PhiAttention<B> {
         let [batch, seq_len, _hidden] = x.dims();
         let kv_dim = self.head_dim * self.num_kv_heads;
 
-        // Fused QKV projection
-        let qkv = self.qkv_proj.forward(x);
+        // Fused QKV projection — upcast to f32 for f16 stability
+        let dtype = x.dtype();
+        let qkv = if dtype == DType::F16 {
+            self.qkv_proj.forward(x.cast(DType::F32)).cast(dtype)
+        } else {
+            self.qkv_proj.forward(x)
+        };
 
         // Split into Q, K, V
         let q = qkv
@@ -294,7 +300,11 @@ impl<B: Backend> PhiAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     pub fn forward_cached(
@@ -309,8 +319,13 @@ impl<B: Backend> PhiAttention<B> {
         let [batch, seq_len, _hidden] = x.dims();
         let kv_dim = self.head_dim * self.num_kv_heads;
 
-        // Fused QKV projection
-        let qkv = self.qkv_proj.forward(x);
+        // Fused QKV projection — upcast to f32 for f16 stability
+        let dtype = x.dtype();
+        let qkv = if dtype == DType::F16 {
+            self.qkv_proj.forward(x.cast(DType::F32)).cast(dtype)
+        } else {
+            self.qkv_proj.forward(x)
+        };
 
         // Split into Q, K, V
         let q = qkv
@@ -359,7 +374,11 @@ impl<B: Backend> PhiAttention<B> {
         let out = out
             .swap_dims(1, 2)
             .reshape([batch, seq_len, self.num_heads * self.head_dim]);
-        self.o_proj.forward(out)
+        if dtype == DType::F16 {
+            self.o_proj.forward(out.cast(DType::F32)).cast(dtype)
+        } else {
+            self.o_proj.forward(out)
+        }
     }
 
     fn repeat_kv(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
