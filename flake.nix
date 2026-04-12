@@ -49,6 +49,20 @@
           NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
           CUDA_PATH = pkgs.cudaPackages.cudatoolkit;
         };
+
+        # ROCm shell - use with `nix develop .#rocm`
+        # Requires AMD GPU with ROCm kernel driver (/dev/kfd)
+        devShells.rocm = pkgs.mkShell rec {
+          buildInputs = commonBuildInputs ++ (with pkgs.rocmPackages; [
+            rocm-runtime   # libamdhip64.so, hip headers
+            rocminfo
+          ]);
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs
+            + ":$LD_LIBRARY_PATH";
+          NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
+          # Tell cubecl-hip-sys where to find ROCm
+          ROCM_PATH = pkgs.rocmPackages.rocm-runtime;
+        };
       }
     );
 }
