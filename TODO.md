@@ -424,7 +424,7 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 
 #### Experimental / Research (Lower Priority)
 - [x] xLSTM - sLSTM (exponential gates + normalizer stabilizer) and mLSTM (matrix memory C∈ℝ^{d_v×d_k}) cells
-- [ ] Zamba/Zamba2 - Zyphra's Mamba backbone + shared attention layers
+- [x] Zamba/Zamba2 - Mamba backbone + shared GQA attention (weight-tied across attn layers) + per-layer LoRA adapters (Zamba2)
 - [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU + local attention
 - [x] RetNet - Microsoft's retentive network — recurrent mode, S_t = γ·S_{t-1} + k⊗v
 - [ ] Hyena/StripedHyena - Long convolutions + gating, subquadratic attention
