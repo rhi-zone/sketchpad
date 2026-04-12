@@ -87,11 +87,12 @@
 - [x] Add `--flash-attention` CLI flag (default enabled)
 - [x] bf16 support with Cargo feature flags
 - [x] Create pipeline variant using `CrossAttentionCubeCL` with flash attention
-- [ ] Test bf16 generation on different GPU architectures
+- [ ] Test bf16 generation on different GPU architectures (Turing, Ampere, Ada)
 
 **Low Priority** (f16 overflow requires upcasting ALL matmuls, not just attention):
-- [ ] Upcast all Linear layers for f16 stability (wrap nn::Linear with f32 compute)
-- [ ] Upcast GroupNorm variance calculation
+- [x] Upcast GroupNorm/RMSNorm variance to f32 (fixes NaN in f16 precision)
+- [x] `Upcasted<B>` Linear wrapper — f32 compute, cast output back to original dtype
+- [ ] Apply `Upcasted<B>` to attention projections in f16 models (currently available but not wired in)
 - [ ] Mixed precision pipeline (different precision per component)
 
 **Cargo feature flags for precision presets**:
@@ -330,8 +331,8 @@ See `docs/cubecl-guide.md` for implementation details.
 - [ ] End-to-end GGUF test with Gemma 4 26B-A4B (Q4_K_S) — use `load_gemma4_gguf_gpu_quant`; attention/FFN weights stay as Q4K bytes in VRAM (~1–2 GB), MoE experts zero-copy mmap'd. Should fit a 16 GB GPU. Unrun, not blocked.
 - [x] Anthropic-compatible HTTP API adapter — `POST /v1/messages`, SSE streaming, `sketchpad llm serve` CLI command (feature: `llm-serve`)
 - [x] TurboQuant KV cache compression — `CompressedKvCache<B>` with PolarQuant (~3.9x vs f16, magnitude f16 + 4-bit direction); `--kv-quant` CLI flag; KV cache size included in VRAM budget estimate
-- [ ] TurboQuant: wire `CompressedKvCache` into model inference (currently only affects VRAM estimate, not actual cache used)
-- [ ] TurboQuant: QJL variant (random projection + 1-bit quantization, theoretical guarantees on attention quality)
+- [x] TurboQuant: wire `CompressedKvCache` into model inference — `--kv-quant` active during inference via `KvCacheConfig` in `GenerationConfig`
+- [x] TurboQuant: QJL variant — 1-bit sign quantization after random Gaussian projection, LCG-seeded deterministic R matrix, `compression_ratio = (2 + proj_dim/8) / (head_dim * 2)`
 
 #### Memory / Offloading (GGUF inference)
 
@@ -424,7 +425,7 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 #### Experimental / Research (Lower Priority)
 - [ ] xLSTM - Extended LSTM with exponential gating and matrix memory (Sepp Hochreiter)
 - [ ] Zamba/Zamba2 - Zyphra's Mamba backbone + shared attention layers
-- [ ] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma)
+- [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU cells, local attention interleaving, Hawk variant (recurrence-only)
 - [ ] RetNet - Microsoft's retentive network, parallel/recurrent/chunkwise modes
 - [ ] Hyena/StripedHyena - Long convolutions + gating, subquadratic attention
 - [ ] TTT (Test-Time Training) - Hidden state updated via gradient descent during inference
