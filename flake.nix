@@ -59,6 +59,7 @@
             rocm-runtime # libhsa-runtime64.so (HSA runtime, needed at runtime)
           ]);
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath buildInputs
+            + ":/run/opengl-driver/lib"  # System AMDGPU driver (libdrm_amdgpu.so, etc.)
             + ":$LD_LIBRARY_PATH";
           NIX_LD = "${pkgs.stdenv.cc.libc}/lib/ld-linux-x86-64.so.2";
           # cubecl-hip-sys build.rs checks HIP_PATH (or ROCM_PATH) to find libraries

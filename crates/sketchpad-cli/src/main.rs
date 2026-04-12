@@ -1412,7 +1412,7 @@ fn run_sd1x_generate_impl<B: Backend>(
 /// accumulation internally to prevent the NaN overflow that occurs with
 /// standard attention in f16.
 #[cfg(feature = "cubecl")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)] // TODO: wire into ROCm SD1x dispatch
 fn run_sd1x_generate_flash<R, F, I, BT>(
     prompt: &str,
     negative: &str,
