@@ -428,9 +428,9 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 - [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU + local attention
 - [x] RetNet - Microsoft's retentive network — recurrent mode, S_t = γ·S_{t-1} + k⊗v
 - [x] Hyena/StripedHyena - Long convolutions + gating; HyenaFilter (sinusoidal MLP), direct_conv, optional interleaved GQA attention
-- [ ] TTT (Test-Time Training) - Hidden state updated via gradient descent during inference
+- [x] TTT (Test-Time Training) - TTT-Linear and TTT-MLP; explicit gradient update of W_inner per token
 - [x] LLaDA - Masked diffusion LM; bidirectional transformer + iterative unmask-by-confidence loop
-- [ ] TESS-2 - Simplex diffusion LM, reward guidance for alignment
+- [x] TESS-2 - Simplex diffusion LM; soft embeddings + simplex interpolation steps, forward_soft()
 
 ## Issues Log
 
