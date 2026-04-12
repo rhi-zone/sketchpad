@@ -109,7 +109,7 @@ cargo build -p burn-models-cli --no-default-features --features cuda,preset-qual
 
 ### Code Organization (High Priority)
 - [x] Split pipeline.rs into separate files by model: sd1x.rs, sdxl.rs, mod.rs
-- [ ] Split large model files generally (unet_sd.rs, blocks.rs, etc.)
+- [x] Split large model files — unet_sd.rs (496L), blocks.rs (536L) already small; cubecl.rs (1109L) and stable_cascade.rs (1025L) are the largest remaining if needed
 
 - [x] SD1x CLI defaults: 512x512 (native resolution), f16 precision (2026-01-07)
 
