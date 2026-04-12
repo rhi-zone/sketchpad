@@ -92,7 +92,7 @@
 **Low Priority** (f16 overflow requires upcasting ALL matmuls, not just attention):
 - [x] Upcast GroupNorm/RMSNorm variance to f32 (fixes NaN in f16 precision)
 - [x] `Upcasted<B>` Linear wrapper — f32 compute, cast output back to original dtype
-- [ ] Apply `Upcasted<B>` to attention projections in f16 models (currently available but not wired in)
+- [x] Apply f32 upcast to attention projections in f16 models — inline dtype guard in all 7 attention modules
 - [ ] Mixed precision pipeline (different precision per component)
 
 **Cargo feature flags for precision presets**:
@@ -427,9 +427,9 @@ is acceptable for CPU-offloaded inference where memory is the constraint anyway.
 - [x] Zamba/Zamba2 - Mamba backbone + shared GQA attention (weight-tied across attn layers) + per-layer LoRA adapters (Zamba2)
 - [x] Griffin/Hawk - Google DeepMind's gated linear recurrences (RecurrentGemma) — RG-LRU + local attention
 - [x] RetNet - Microsoft's retentive network — recurrent mode, S_t = γ·S_{t-1} + k⊗v
-- [ ] Hyena/StripedHyena - Long convolutions + gating, subquadratic attention
+- [x] Hyena/StripedHyena - Long convolutions + gating; HyenaFilter (sinusoidal MLP), direct_conv, optional interleaved GQA attention
 - [ ] TTT (Test-Time Training) - Hidden state updated via gradient descent during inference
-- [ ] LLaDA - Large Language Diffusion with Masking, bidirectional diffusion LM
+- [x] LLaDA - Masked diffusion LM; bidirectional transformer + iterative unmask-by-confidence loop
 - [ ] TESS-2 - Simplex diffusion LM, reward guidance for alignment
 
 ## Issues Log
