@@ -25,7 +25,7 @@ ndarray = ["burn/ndarray"]
 tch = ["burn/tch"]
 wgpu = ["burn/wgpu"]
 cuda = ["burn/cuda"]
-rocm = ["burn-rocm", "dep:cubecl", "cubecl/hip", "sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl"]
+rocm = ["burn-rocm", "dep:cubecl", "cubecl/hip", "cubecl", "sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl"]
 
 # CubeCL acceleration (flash attention for f16/bf16) - enabled by default
 cubecl = ["sketchpad/cubecl", "sketchpad-unet/cubecl", "sketchpad-llm/cubecl", "burn-cubecl", "dep:cubecl"]

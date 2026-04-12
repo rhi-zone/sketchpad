@@ -1801,6 +1801,10 @@ fn run_sdxl_generate(
 ) -> Result<()> {
     let device = resolve_device(requested_device);
 
+    // flash_attention/low_vram/vae_clamp are only wired up for the CUDA path currently
+    #[cfg(not(feature = "cuda"))]
+    let _ = (flash_attention, low_vram, vae_clamp);
+
     match device {
         #[cfg(feature = "cuda")]
         Device::Cuda => {
@@ -1958,8 +1962,6 @@ fn run_sdxl_generate(
             use burn::backend::{Wgpu, wgpu::WgpuDevice};
             let wgpu_device = WgpuDevice::default();
             // Flash attention / low_vram / vae_clamp not yet implemented for wgpu SDXL
-            let _ = (flash_attention, low_vram, vae_clamp);
-
             match precision {
                 #[cfg(feature = "precision-f16")]
                 Precision::F16 => {
