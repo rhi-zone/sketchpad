@@ -49,8 +49,14 @@ use crate::{
     phi_loader::load_phi,
     qwen::{Qwen, QwenConfig, QwenRuntime},
     qwen_loader::load_qwen,
+    retnet::{RetNet, RetNetConfig, RetNetRuntime},
+    retnet_loader::load_retnet,
     rwkv::{Rwkv, RwkvConfig, RwkvRuntime},
     rwkv_loader::load_rwkv,
+    xlstm::{XLstm, XLstmConfig, XLstmRuntime},
+    xlstm_loader::load_xlstm,
+    zamba::{Zamba, ZambaConfig, ZambaRuntime},
+    zamba_loader::load_zamba,
 };
 
 /// Errors that can occur during LLM operations
@@ -100,6 +106,12 @@ pub enum ModelType {
     Jamba,
     /// Griffin / Hawk (RecurrentGemma)
     Griffin,
+    /// RetNet — Retentive Network (recurrent inference mode)
+    RetNet,
+    /// xLSTM — Extended Long Short-Term Memory (sLSTM + mLSTM)
+    XLstm,
+    /// Zamba / Zamba2 — Mamba backbone with shared attention
+    Zamba,
 }
 
 impl std::str::FromStr for ModelType {
@@ -119,6 +131,9 @@ impl std::str::FromStr for ModelType {
             "mamba" => Ok(Self::Mamba),
             "jamba" => Ok(Self::Jamba),
             "griffin" | "hawk" | "recurrentgemma" => Ok(Self::Griffin),
+            "retnet" => Ok(Self::RetNet),
+            "xlstm" => Ok(Self::XLstm),
+            "zamba" | "zamba2" => Ok(Self::Zamba),
             _ => Err(()),
         }
     }
@@ -140,6 +155,9 @@ impl ModelType {
             Self::Mamba => "mamba",
             Self::Jamba => "jamba",
             Self::Griffin => "griffin",
+            Self::RetNet => "retnet",
+            Self::XLstm => "xlstm",
+            Self::Zamba => "zamba",
         }
     }
 }
@@ -230,6 +248,9 @@ enum ModelInstance<B: Backend> {
     Mamba(Mamba<B>, MambaRuntime<B>),
     Jamba(Jamba<B>, JambaRuntime<B>),
     Griffin(Griffin<B>, GriffinRuntime<B>),
+    RetNet(RetNet<B>, RetNetRuntime<B>),
+    XLstm(XLstm<B>, XLstmRuntime<B>),
+    Zamba(Zamba<B>, Box<ZambaRuntime<B>>),
 }
 
 /// Unified LLM instance that can load and run any supported model
@@ -395,6 +416,24 @@ impl<B: Backend> LlmInstance<B> {
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::Griffin(model, runtime))
             }
+            ModelType::RetNet => {
+                let config = parse_retnet_config(&config_str)?;
+                let (model, runtime) = load_retnet(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::RetNet(model, runtime))
+            }
+            ModelType::XLstm => {
+                let config = parse_xlstm_config(&config_str)?;
+                let (model, runtime) = load_xlstm(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::XLstm(model, runtime))
+            }
+            ModelType::Zamba => {
+                let config = parse_zamba_config(&config_str)?;
+                let (model, runtime) = load_zamba(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Zamba(model, Box::new(runtime)))
+            }
         }
     }
 
@@ -510,6 +549,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::Mamba(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Jamba(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Griffin(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::RetNet(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::XLstm(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Zamba(m, _) => m.embed_tokens.weight.val().device(),
         }
     }
 
@@ -607,6 +649,15 @@ impl<B: Backend> LlmInstance<B> {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
             ModelInstance::Jamba(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::RetNet(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::XLstm(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
+            }
+            ModelInstance::Zamba(model, runtime) => {
                 model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
             ModelInstance::Griffin(model, runtime) => {
@@ -910,6 +961,102 @@ fn parse_jamba_config(json: &str) -> Result<JambaConfig, LlmError> {
         attn_layer_period: v["attn_layer_period"].as_u64().unwrap_or(8) as usize,
         moe_layer_period: v["expert_layer_period"].as_u64().unwrap_or(2) as usize,
         layer_norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-6),
+    })
+}
+
+fn parse_retnet_config(json: &str) -> Result<RetNetConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(2048) as usize;
+    let num_heads = v["num_heads"].as_u64().unwrap_or(8) as usize;
+    let qk_dim = v["qk_dim"].as_u64().unwrap_or((d_model / num_heads) as u64) as usize;
+    let v_dim = v["v_dim"].as_u64().unwrap_or(qk_dim as u64) as usize;
+
+    Ok(RetNetConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(24) as usize,
+        d_model,
+        num_heads,
+        d_ffn: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        qk_dim,
+        v_dim,
+    })
+}
+
+fn parse_xlstm_config(json: &str) -> Result<XLstmConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(512) as usize;
+    let num_heads = v["num_heads"].as_u64().unwrap_or(8) as usize;
+    let qk_dim = v["qk_dim"].as_u64().unwrap_or((d_model / num_heads) as u64) as usize;
+    let v_dim = v["v_dim"].as_u64().unwrap_or(qk_dim as u64) as usize;
+    let num_layers = v["num_hidden_layers"].as_u64().unwrap_or(12) as usize;
+
+    let mlstm_at_layers = if let Some(arr) = v["mlstm_at_layers"].as_array() {
+        arr.iter()
+            .filter_map(|x| x.as_u64().map(|n| n as usize))
+            .collect()
+    } else {
+        // Default: even layers use mLSTM
+        (0..num_layers).filter(|i| i % 2 == 0).collect()
+    };
+
+    Ok(XLstmConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers,
+        d_model,
+        d_inner: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        num_heads,
+        qk_dim,
+        v_dim,
+        mlstm_at_layers,
+        layer_norm_eps: v["layer_norm_eps"].as_f64().unwrap_or(1e-5),
+    })
+}
+
+fn parse_zamba_config(json: &str) -> Result<ZambaConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(2560) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(32) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    let arch = v["architectures"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let is_zamba2 = arch.contains("Zamba2") || v["model_type"].as_str() == Some("zamba2");
+
+    Ok(ZambaConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(54) as usize,
+        d_model,
+        d_state: v["mamba_d_state"].as_u64().unwrap_or(64) as usize,
+        d_conv: v["mamba_d_conv"].as_u64().unwrap_or(4) as usize,
+        expand: v["mamba_expand"].as_u64().unwrap_or(2) as usize,
+        num_heads,
+        num_kv_heads: v["num_key_value_heads"]
+            .as_u64()
+            .unwrap_or(num_heads as u64) as usize,
+        head_dim,
+        attn_layer_offset: v["attn_layer_offset"].as_u64().unwrap_or(3) as usize,
+        attn_layer_period: v["attn_layer_period"].as_u64().unwrap_or(6) as usize,
+        intermediate_size: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        is_zamba2,
+        lora_rank: v["lora_rank"].as_u64().unwrap_or(64) as usize,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
     })
 }
 

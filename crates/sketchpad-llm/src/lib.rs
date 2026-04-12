@@ -82,8 +82,14 @@ pub mod phi;
 pub mod phi_loader;
 pub mod qwen;
 pub mod qwen_loader;
+pub mod retnet;
+pub mod retnet_loader;
 pub mod rwkv;
 pub mod rwkv_loader;
+pub mod xlstm;
+pub mod xlstm_loader;
+pub mod zamba;
+pub mod zamba_loader;
 
 // Quantized inference
 pub mod quantized;
@@ -125,8 +131,23 @@ pub use phi::{Phi, PhiConfig, PhiOutput, PhiRuntime};
 pub use phi_loader::{PhiLoadError, load_phi};
 pub use qwen::{Qwen, QwenConfig, QwenOutput, QwenRuntime};
 pub use qwen_loader::{QwenLoadError, load_qwen};
+pub use retnet::{
+    MultiScaleRetention, RetNet, RetNetConfig, RetNetFFN, RetNetLayer, RetNetLayerState,
+    RetNetOutput, RetNetRuntime,
+};
+pub use retnet_loader::{RetNetLoadError, load_retnet};
 pub use rwkv::{Rwkv, RwkvConfig, RwkvOutput, RwkvRuntime, RwkvState};
 pub use rwkv_loader::{RwkvLoadError, load_rwkv};
+pub use xlstm::{
+    MLstmCell, SLstmCell, XLstm, XLstmBlock, XLstmConfig, XLstmLayerState, XLstmOutput,
+    XLstmRuntime,
+};
+pub use xlstm_loader::{XLstmLoadError, load_xlstm};
+pub use zamba::{
+    Zamba, ZambaBlock, ZambaConfig, ZambaLoraAdapter, ZambaMamba, ZambaMlp, ZambaOutput,
+    ZambaRuntime, ZambaSharedAttention, ZambaState,
+};
+pub use zamba_loader::{ZambaLoadError, load_zamba};
 
 // Re-export quantized types
 pub use quantized::{
