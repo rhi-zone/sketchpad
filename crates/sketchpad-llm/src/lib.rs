@@ -70,6 +70,8 @@ pub mod griffin;
 pub mod griffin_loader;
 pub mod jamba;
 pub mod jamba_loader;
+pub mod llada;
+pub mod llada_loader;
 pub mod llama;
 pub mod llama_loader;
 pub mod mamba;
@@ -119,6 +121,8 @@ pub use griffin::{Griffin, GriffinConfig, GriffinOutput, GriffinRuntime, Griffin
 pub use griffin_loader::{GriffinLoadError, load_griffin};
 pub use jamba::{Jamba, JambaConfig, JambaOutput, JambaRuntime, JambaState};
 pub use jamba_loader::{JambaLoadError, load_jamba};
+pub use llada::{LLaDa, LLaDaConfig, LLaDaOutput, LLaDaRuntime};
+pub use llada_loader::{LLaDaLoadError, load_llada};
 pub use llama::{Llama, LlamaConfig, LlamaOutput, LlamaRuntime};
 pub use llama_loader::{LlamaLoadError, load_llama};
 pub use mamba::{Mamba, MambaConfig, MambaOutput, MambaRuntime, MambaState};

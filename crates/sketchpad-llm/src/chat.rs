@@ -112,7 +112,8 @@ impl ChatTemplate {
             | ModelType::Griffin
             | ModelType::RetNet
             | ModelType::XLstm
-            | ModelType::Zamba => Self::Simple,
+            | ModelType::Zamba
+            | ModelType::LLaDa => Self::Simple,
         }
     }
 

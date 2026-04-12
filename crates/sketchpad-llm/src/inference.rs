@@ -37,6 +37,8 @@ use crate::{
     griffin_loader::load_griffin,
     jamba::{Jamba, JambaConfig, JambaRuntime},
     jamba_loader::load_jamba,
+    llada::{LLaDa, LLaDaConfig, LLaDaRuntime},
+    llada_loader::load_llada,
     llama::{Llama, LlamaConfig, LlamaRuntime},
     llama_loader::load_llama,
     mamba::{Mamba, MambaConfig, MambaRuntime},
@@ -112,6 +114,8 @@ pub enum ModelType {
     XLstm,
     /// Zamba / Zamba2 — Mamba backbone with shared attention
     Zamba,
+    /// LLaDA — Large Language Diffusion with Masking (bidirectional, iterative denoising)
+    LLaDa,
 }
 
 impl std::str::FromStr for ModelType {
@@ -134,6 +138,7 @@ impl std::str::FromStr for ModelType {
             "retnet" => Ok(Self::RetNet),
             "xlstm" => Ok(Self::XLstm),
             "zamba" | "zamba2" => Ok(Self::Zamba),
+            "llada" => Ok(Self::LLaDa),
             _ => Err(()),
         }
     }
@@ -158,15 +163,36 @@ impl ModelType {
             Self::RetNet => "retnet",
             Self::XLstm => "xlstm",
             Self::Zamba => "zamba",
+            Self::LLaDa => "llada",
         }
     }
+}
+
+/// How tokens are generated — autoregressive vs. diffusion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "lowercase")]
+pub enum GenerationMode {
+    /// Standard autoregressive generation (default)
+    Autoregressive,
+    /// Masked diffusion generation (LLaDA)
+    ///
+    /// `output_len` new tokens are generated in `num_steps` denoising steps
+    /// rather than one token at a time.
+    Diffusion {
+        /// Number of output tokens to generate
+        output_len: usize,
+        /// Diffusion steps (higher = better quality, more compute)
+        num_steps: usize,
+    },
 }
 
 /// Configuration for text generation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
-    /// Maximum number of tokens to generate
+    /// Maximum number of tokens to generate (used for autoregressive mode)
     pub max_tokens: usize,
+    /// Generation mode: autoregressive (default) or diffusion (LLaDA)
+    pub mode: GenerationMode,
     /// Sampler configuration (temperature, top-k, top-p, DRY, XTC, etc.)
     #[serde(skip)]
     pub sampler: crate::sampling::SamplerConfig,
@@ -181,6 +207,7 @@ impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
             max_tokens: 256,
+            mode: GenerationMode::Autoregressive,
             sampler: crate::sampling::SamplerConfig::default(),
             stop_sequences: Vec::new(),
             kv_cache: KvCacheConfig::Standard,
@@ -232,10 +259,20 @@ impl GenerationConfig {
         self.kv_cache = kv_cache;
         self
     }
+
+    /// Use diffusion generation mode (for LLaDA models)
+    pub fn with_diffusion(mut self, output_len: usize, num_steps: usize) -> Self {
+        self.mode = GenerationMode::Diffusion {
+            output_len,
+            num_steps,
+        };
+        self
+    }
 }
 
 /// Internal enum wrapping model + runtime pairs
 enum ModelInstance<B: Backend> {
+    LLaDa(LLaDa<B>, LLaDaRuntime<B>),
     Llama(Llama<B>, LlamaRuntime<B>),
     Mistral(Mistral<B>, MistralRuntime<B>),
     Mixtral(Mixtral<B>, MixtralRuntime<B>),
@@ -434,6 +471,12 @@ impl<B: Backend> LlmInstance<B> {
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::Zamba(model, Box::new(runtime)))
             }
+            ModelType::LLaDa => {
+                let config = parse_llada_config(&config_str)?;
+                let (model, runtime) = load_llada(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::LLaDa(model, runtime))
+            }
         }
     }
 
@@ -552,6 +595,7 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::RetNet(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::XLstm(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Zamba(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::LLaDa(m, _) => m.embed_tokens.weight.val().device(),
         }
     }
 
@@ -669,6 +713,18 @@ impl<B: Backend> LlmInstance<B> {
                     cache.as_mut(),
                     &config.sampler,
                 )
+            }
+            ModelInstance::LLaDa(model, runtime) => {
+                let (output_len, num_steps) = match config.mode {
+                    GenerationMode::Diffusion {
+                        output_len,
+                        num_steps,
+                    } => (output_len, num_steps),
+                    GenerationMode::Autoregressive => {
+                        (config.max_tokens, runtime.config.num_diffusion_steps)
+                    }
+                };
+                model.generate(input_ids, output_len, num_steps, runtime, &config.sampler)
             }
         }
     }
@@ -1057,6 +1113,36 @@ fn parse_zamba_config(json: &str) -> Result<ZambaConfig, LlmError> {
         is_zamba2,
         lora_rank: v["lora_rank"].as_u64().unwrap_or(64) as usize,
         norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
+    })
+}
+
+fn parse_llada_config(json: &str) -> Result<LLaDaConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(2048) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(16) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    Ok(LLaDaConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(24) as usize,
+        d_model,
+        num_heads,
+        num_kv_heads: v["num_key_value_heads"]
+            .as_u64()
+            .unwrap_or(num_heads as u64) as usize,
+        head_dim,
+        intermediate_size: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        mask_token_id: v["mask_token_id"].as_u64().unwrap_or(126336) as u32,
+        num_diffusion_steps: v["num_diffusion_steps"].as_u64().unwrap_or(20) as usize,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
+        rope_base: v["rope_theta"].as_f64().unwrap_or(10000.0) as f32,
+        max_seq_len: v["max_position_embeddings"].as_u64().unwrap_or(2048) as usize,
     })
 }
 
