@@ -90,6 +90,10 @@ pub mod retnet;
 pub mod retnet_loader;
 pub mod rwkv;
 pub mod rwkv_loader;
+pub mod tess;
+pub mod tess_loader;
+pub mod ttt;
+pub mod ttt_loader;
 pub mod xlstm;
 pub mod xlstm_loader;
 pub mod zamba;
@@ -149,6 +153,13 @@ pub use retnet::{
 pub use retnet_loader::{RetNetLoadError, load_retnet};
 pub use rwkv::{Rwkv, RwkvConfig, RwkvOutput, RwkvRuntime, RwkvState};
 pub use rwkv_loader::{RwkvLoadError, load_rwkv};
+pub use tess::{Tess, TessConfig, TessLayer, TessRuntime};
+pub use tess_loader::{TessLoadError, load_tess};
+pub use ttt::{
+    Ttt, TttBlock, TttConfig, TttLayerState, TttLinearLayer, TttOutput, TttRuntime, TttState,
+    TttSwiGluFfn,
+};
+pub use ttt_loader::{TttLoadError, load_ttt};
 pub use xlstm::{
     MLstmCell, SLstmCell, XLstm, XLstmBlock, XLstmConfig, XLstmLayerState, XLstmOutput,
     XLstmRuntime,

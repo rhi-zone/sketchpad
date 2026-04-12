@@ -57,6 +57,10 @@ use crate::{
     retnet_loader::load_retnet,
     rwkv::{Rwkv, RwkvConfig, RwkvRuntime},
     rwkv_loader::load_rwkv,
+    tess::{Tess, TessConfig, TessRuntime},
+    tess_loader::load_tess,
+    ttt::{Ttt, TttConfig, TttRuntime},
+    ttt_loader::load_ttt,
     xlstm::{XLstm, XLstmConfig, XLstmRuntime},
     xlstm_loader::load_xlstm,
     zamba::{Zamba, ZambaConfig, ZambaRuntime},
@@ -118,8 +122,12 @@ pub enum ModelType {
     Zamba,
     /// LLaDA — Large Language Diffusion with Masking (bidirectional, iterative denoising)
     LLaDa,
+    /// TESS-2 — Text Encoder with Simplex Diffusion (continuous simplex diffusion LM)
+    Tess,
     /// Hyena / StripedHyena — long-convolution operator with optional interleaved attention
     Hyena,
+    /// TTT — Test-Time Training layers with gradient-updated recurrent state
+    Ttt,
 }
 
 impl std::str::FromStr for ModelType {
@@ -143,6 +151,7 @@ impl std::str::FromStr for ModelType {
             "xlstm" => Ok(Self::XLstm),
             "zamba" | "zamba2" => Ok(Self::Zamba),
             "llada" => Ok(Self::LLaDa),
+            "tess" | "tess2" => Ok(Self::Tess),
             "hyena" | "stripedhydena" | "stripedhyena" => Ok(Self::Hyena),
             _ => Err(()),
         }
@@ -169,7 +178,9 @@ impl ModelType {
             Self::XLstm => "xlstm",
             Self::Zamba => "zamba",
             Self::LLaDa => "llada",
+            Self::Tess => "tess",
             Self::Hyena => "hyena",
+            Self::Ttt => "ttt",
         }
     }
 }
@@ -294,6 +305,8 @@ enum ModelInstance<B: Backend> {
     RetNet(RetNet<B>, RetNetRuntime<B>),
     XLstm(XLstm<B>, XLstmRuntime<B>),
     Zamba(Zamba<B>, Box<ZambaRuntime<B>>),
+    Tess(Tess<B>, TessRuntime<B>),
+    Ttt(Ttt<B>, TttRuntime<B>),
     Hyena(Hyena<B>, HyenaRuntime<B>),
 }
 
@@ -484,11 +497,23 @@ impl<B: Backend> LlmInstance<B> {
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::LLaDa(model, runtime))
             }
+            ModelType::Tess => {
+                let config = parse_tess_config(&config_str)?;
+                let (model, runtime) = load_tess(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Tess(model, runtime))
+            }
             ModelType::Hyena => {
                 let config = parse_hyena_config(&config_str)?;
                 let (model, runtime) = load_hyena(&safetensors_path, &config, device)
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::Hyena(model, runtime))
+            }
+            ModelType::Ttt => {
+                let config = parse_ttt_config(&config_str)?;
+                let (model, runtime) = load_ttt(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Ttt(model, runtime))
             }
         }
     }
@@ -609,7 +634,9 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::XLstm(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Zamba(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::LLaDa(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Tess(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Hyena(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Ttt(m, _) => m.embed_tokens.weight.val().device(),
         }
     }
 
@@ -740,6 +767,27 @@ impl<B: Backend> LlmInstance<B> {
                 };
                 model.generate(input_ids, output_len, num_steps, runtime, &config.sampler)
             }
+            ModelInstance::Tess(model, runtime) => {
+                let (output_len, num_steps) = match config.mode {
+                    GenerationMode::Diffusion {
+                        output_len,
+                        num_steps,
+                    } => (output_len, num_steps),
+                    GenerationMode::Autoregressive => {
+                        (config.max_tokens, runtime.config.num_diffusion_steps)
+                    }
+                };
+                // TESS generate returns [batch, output_len], not [batch, prompt+output]
+                // Reconstruct full sequence by concatenating prompt + generated
+                let generated = model.generate(
+                    input_ids.clone(),
+                    output_len,
+                    num_steps,
+                    runtime,
+                    &config.sampler,
+                );
+                Tensor::cat(vec![input_ids, generated], 1)
+            }
             ModelInstance::Hyena(model, runtime) => {
                 let mut cache = runtime.create_kv_cache(&config.kv_cache);
                 model.generate(
@@ -749,6 +797,9 @@ impl<B: Backend> LlmInstance<B> {
                     cache.as_mut(),
                     &config.sampler,
                 )
+            }
+            ModelInstance::Ttt(model, runtime) => {
+                model.generate(input_ids, runtime, config.max_tokens, &config.sampler)
             }
         }
     }
@@ -1196,6 +1247,63 @@ fn parse_llada_config(json: &str) -> Result<LLaDaConfig, LlmError> {
         norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
         rope_base: v["rope_theta"].as_f64().unwrap_or(10000.0) as f32,
         max_seq_len: v["max_position_embeddings"].as_u64().unwrap_or(2048) as usize,
+    })
+}
+
+fn parse_tess_config(json: &str) -> Result<TessConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(2048) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(16) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    Ok(TessConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(24) as usize,
+        d_model,
+        num_heads,
+        num_kv_heads: v["num_key_value_heads"]
+            .as_u64()
+            .unwrap_or(num_heads as u64) as usize,
+        head_dim,
+        intermediate_size: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        num_diffusion_steps: v["num_diffusion_steps"].as_u64().unwrap_or(50) as usize,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
+        rope_base: v["rope_theta"].as_f64().unwrap_or(10000.0) as f32,
+        max_seq_len: v["max_position_embeddings"].as_u64().unwrap_or(2048) as usize,
+    })
+}
+
+fn parse_ttt_config(json: &str) -> Result<TttConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(512) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(8) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    Ok(TttConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(12) as usize,
+        d_model,
+        num_heads,
+        head_dim,
+        intermediate_size: v["intermediate_size"]
+            .as_u64()
+            .unwrap_or((d_model * 4) as u64) as usize,
+        ttt_lr: v["ttt_lr"].as_f64().unwrap_or(1e-3) as f32,
+        use_mlp: v["use_mlp"].as_bool().unwrap_or(false),
+        mlp_hidden: v["mlp_hidden"]
+            .as_u64()
+            .unwrap_or((d_model / 4).max(1) as u64) as usize,
+        layer_norm_eps: v["layer_norm_eps"].as_f64().unwrap_or(1e-5),
     })
 }
 

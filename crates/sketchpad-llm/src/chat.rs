@@ -114,6 +114,8 @@ impl ChatTemplate {
             | ModelType::XLstm
             | ModelType::Zamba
             | ModelType::LLaDa
+            | ModelType::Tess
+            | ModelType::Ttt
             | ModelType::Hyena => Self::Simple,
         }
     }
