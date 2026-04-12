@@ -35,6 +35,8 @@ use crate::{
     gemma4_loader::load_gemma4,
     griffin::{Griffin, GriffinConfig, GriffinRuntime},
     griffin_loader::load_griffin,
+    hyena::{Hyena, HyenaConfig, HyenaRuntime},
+    hyena_loader::load_hyena,
     jamba::{Jamba, JambaConfig, JambaRuntime},
     jamba_loader::load_jamba,
     llada::{LLaDa, LLaDaConfig, LLaDaRuntime},
@@ -116,6 +118,8 @@ pub enum ModelType {
     Zamba,
     /// LLaDA — Large Language Diffusion with Masking (bidirectional, iterative denoising)
     LLaDa,
+    /// Hyena / StripedHyena — long-convolution operator with optional interleaved attention
+    Hyena,
 }
 
 impl std::str::FromStr for ModelType {
@@ -139,6 +143,7 @@ impl std::str::FromStr for ModelType {
             "xlstm" => Ok(Self::XLstm),
             "zamba" | "zamba2" => Ok(Self::Zamba),
             "llada" => Ok(Self::LLaDa),
+            "hyena" | "stripedhydena" | "stripedhyena" => Ok(Self::Hyena),
             _ => Err(()),
         }
     }
@@ -164,6 +169,7 @@ impl ModelType {
             Self::XLstm => "xlstm",
             Self::Zamba => "zamba",
             Self::LLaDa => "llada",
+            Self::Hyena => "hyena",
         }
     }
 }
@@ -288,6 +294,7 @@ enum ModelInstance<B: Backend> {
     RetNet(RetNet<B>, RetNetRuntime<B>),
     XLstm(XLstm<B>, XLstmRuntime<B>),
     Zamba(Zamba<B>, Box<ZambaRuntime<B>>),
+    Hyena(Hyena<B>, HyenaRuntime<B>),
 }
 
 /// Unified LLM instance that can load and run any supported model
@@ -477,6 +484,12 @@ impl<B: Backend> LlmInstance<B> {
                     .map_err(|e| LlmError::LoadError(e.to_string()))?;
                 Ok(ModelInstance::LLaDa(model, runtime))
             }
+            ModelType::Hyena => {
+                let config = parse_hyena_config(&config_str)?;
+                let (model, runtime) = load_hyena(&safetensors_path, &config, device)
+                    .map_err(|e| LlmError::LoadError(e.to_string()))?;
+                Ok(ModelInstance::Hyena(model, runtime))
+            }
         }
     }
 
@@ -596,6 +609,7 @@ impl<B: Backend> LlmInstance<B> {
             ModelInstance::XLstm(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::Zamba(m, _) => m.embed_tokens.weight.val().device(),
             ModelInstance::LLaDa(m, _) => m.embed_tokens.weight.val().device(),
+            ModelInstance::Hyena(m, _) => m.embed_tokens.weight.val().device(),
         }
     }
 
@@ -725,6 +739,16 @@ impl<B: Backend> LlmInstance<B> {
                     }
                 };
                 model.generate(input_ids, output_len, num_steps, runtime, &config.sampler)
+            }
+            ModelInstance::Hyena(model, runtime) => {
+                let mut cache = runtime.create_kv_cache(&config.kv_cache);
+                model.generate(
+                    input_ids,
+                    runtime,
+                    config.max_tokens,
+                    cache.as_mut(),
+                    &config.sampler,
+                )
             }
         }
     }
@@ -1073,6 +1097,35 @@ fn parse_xlstm_config(json: &str) -> Result<XLstmConfig, LlmError> {
         v_dim,
         mlstm_at_layers,
         layer_norm_eps: v["layer_norm_eps"].as_f64().unwrap_or(1e-5),
+    })
+}
+
+fn parse_hyena_config(json: &str) -> Result<HyenaConfig, LlmError> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| LlmError::ConfigError(e.to_string()))?;
+
+    let d_model = v["hidden_size"].as_u64().unwrap_or(4096) as usize;
+    let num_heads = v["num_attention_heads"].as_u64().unwrap_or(32) as usize;
+    let head_dim = v["head_dim"]
+        .as_u64()
+        .unwrap_or((d_model / num_heads) as u64) as usize;
+
+    Ok(HyenaConfig {
+        vocab_size: v["vocab_size"].as_u64().unwrap_or(32000) as usize,
+        num_layers: v["num_hidden_layers"].as_u64().unwrap_or(32) as usize,
+        d_model,
+        order: v["hyena_order"].as_u64().unwrap_or(2) as usize,
+        filter_order: v["filter_order"].as_u64().unwrap_or(64) as usize,
+        num_heads,
+        num_kv_heads: v["num_key_value_heads"]
+            .as_u64()
+            .unwrap_or(num_heads as u64) as usize,
+        head_dim,
+        intermediate_size: v["intermediate_size"].as_u64().unwrap_or(11008) as usize,
+        attn_layer_offset: v["attn_layer_offset"].as_u64().unwrap_or(7) as usize,
+        attn_layer_period: v["attn_layer_period"].as_u64().unwrap_or(8) as usize,
+        max_seq_len: v["max_position_embeddings"].as_u64().unwrap_or(32768) as usize,
+        norm_eps: v["rms_norm_eps"].as_f64().unwrap_or(1e-5),
     })
 }
 

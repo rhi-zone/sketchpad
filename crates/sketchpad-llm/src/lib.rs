@@ -68,6 +68,8 @@ pub mod gemma_loader;
 pub mod gguf_tokenizer;
 pub mod griffin;
 pub mod griffin_loader;
+pub mod hyena;
+pub mod hyena_loader;
 pub mod jamba;
 pub mod jamba_loader;
 pub mod llada;
@@ -119,6 +121,11 @@ pub use gemma4_gguf_loader::{Gemma4GgufLoadError, load_gemma4_gguf, load_gemma4_
 pub use gemma4_loader::{Gemma4LoadError, load_gemma4};
 pub use griffin::{Griffin, GriffinConfig, GriffinOutput, GriffinRuntime, GriffinState};
 pub use griffin_loader::{GriffinLoadError, load_griffin};
+pub use hyena::{
+    Hyena, HyenaAttention, HyenaBlock, HyenaConfig, HyenaFilter, HyenaOperator, HyenaOutput,
+    HyenaRuntime, HyenaSwiGluFfn,
+};
+pub use hyena_loader::{HyenaLoadError, load_hyena};
 pub use jamba::{Jamba, JambaConfig, JambaOutput, JambaRuntime, JambaState};
 pub use jamba_loader::{JambaLoadError, load_jamba};
 pub use llada::{LLaDa, LLaDaConfig, LLaDaOutput, LLaDaRuntime};

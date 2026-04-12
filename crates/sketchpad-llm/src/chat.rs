@@ -113,7 +113,8 @@ impl ChatTemplate {
             | ModelType::RetNet
             | ModelType::XLstm
             | ModelType::Zamba
-            | ModelType::LLaDa => Self::Simple,
+            | ModelType::LLaDa
+            | ModelType::Hyena => Self::Simple,
         }
     }
 
