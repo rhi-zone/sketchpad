@@ -149,6 +149,7 @@ pub fn apply_chat_template(
     let messages_val = minijinja::Value::from_serialize(messages);
 
     let mut env = Environment::new();
+    minijinja_contrib::add_to_environment(&mut env);
     env.add_template("chat", &template_str)
         .map_err(|e| GgufTokenizerError(format!("chat template parse error: {e}")))?;
 

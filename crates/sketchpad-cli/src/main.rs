@@ -742,12 +742,13 @@ fn resolve_device(requested: Device) -> Device {
                 panic!("No backend available. Enable 'cuda', 'wgpu', or 'cpu' feature.");
             }
         }
+        #[cfg(any(feature = "cuda", feature = "wgpu", feature = "cpu"))]
         other => other,
     }
 }
 
 /// Run SD 1.x generation with the specified backend
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 fn run_sd1x_generate(
     prompt: &str,
     negative: &str,
@@ -1190,6 +1191,7 @@ impl DebugFlags {
     }
 
     /// Convert to pipeline DebugConfig
+    #[allow(dead_code)]
     fn to_pipeline_config(&self) -> sketchpad::DebugConfig {
         sketchpad::DebugConfig {
             sampler: self.sampler,
@@ -1199,7 +1201,7 @@ impl DebugFlags {
 }
 
 /// SD 1.x generation implementation with a specific backend
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn run_sd1x_generate_impl<B: Backend>(
     prompt: &str,
     negative: &str,
@@ -1776,7 +1778,7 @@ where
 }
 
 /// Run SDXL generation with the specified backend
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 fn run_sdxl_generate(
     prompt: &str,
     negative: &str,
@@ -2086,7 +2088,7 @@ fn run_sdxl_generate(
 }
 
 /// SDXL generation implementation with a specific backend
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn run_sdxl_generate_impl<B: Backend>(
     prompt: &str,
     negative: &str,

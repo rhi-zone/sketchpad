@@ -28,6 +28,7 @@ axum = { version = "0.7", features = ["macros"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 futures-util = { version = "0.3", optional = true }
 minijinja = "2.19.0"
+minijinja-contrib = { version = "2.19.0", features = ["pycompat"] }
 
 [dev-dependencies]
 burn-ndarray = { workspace = true }
