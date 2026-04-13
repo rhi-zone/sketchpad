@@ -6,8 +6,11 @@ license.workspace = true
 description = "CubeCL GPU kernels for burn-models"
 
 [features]
-default = ["cpu"]
+default = []
 # Backend selection - use burn's own feature flags
+# NOTE: enabling cpu activates burn-cpu which depends on cubecl/cpu → cubecl-cpu → tracel-llvm
+# (statically linked LLVM). This conflicts with libamd_comgr.so which loads libLLVM.so
+# dynamically. Don't include cpu in default; let sketchpad-cli's own cpu feature handle it.
 cpu = ["burn/cpu"]
 wgpu = ["burn/wgpu"]
 cuda = ["burn/cuda"]
