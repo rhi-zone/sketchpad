@@ -150,6 +150,7 @@ pub fn apply_chat_template(
 
     let mut env = Environment::new();
     minijinja_contrib::add_to_environment(&mut env);
+    env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_template("chat", &template_str)
         .map_err(|e| GgufTokenizerError(format!("chat template parse error: {e}")))?;
 
