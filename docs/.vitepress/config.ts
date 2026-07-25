@@ -1,43 +1,60 @@
 import { defineConfig } from 'vitepress'
+import { withMermaid } from 'vitepress-plugin-mermaid'
 
-export default defineConfig({
-  title: 'sketchpad',
-  description: 'Stable Diffusion inference in pure Rust with Burn',
+export default withMermaid(
+  defineConfig({
+    title: 'sketchpad',
+    description: 'Stable Diffusion inference in pure Rust with Burn',
 
-  base: '/sketchpad/',
+    base: '/sketchpad/',
 
-  themeConfig: {
-    nav: [
-      { text: 'Guide', link: '/' },
-      { text: 'Samplers', link: '/samplers' },
-      { text: 'Pipelines', link: '/pipelines' },
-    ],
+    srcExclude: ['**/CLAUDE.md'],
 
-    sidebar: [
-      {
-        text: 'Guide',
-        items: [
-          { text: 'Introduction', link: '/' },
-          { text: 'Getting Started', link: '/getting-started' },
-          { text: 'Architecture', link: '/architecture' },
-        ]
+    themeConfig: {
+      nav: [
+        { text: 'Guide', link: '/' },
+        { text: 'Samplers', link: '/samplers' },
+        { text: 'Pipelines', link: '/pipelines' },
+        { text: 'rhi', link: 'https://docs.rhi.zone/' },
+      ],
+
+      sidebar: [
+        {
+          text: 'Guide',
+          items: [
+            { text: 'Introduction', link: '/' },
+            { text: 'Getting Started', link: '/getting-started' },
+            { text: 'Architecture', link: '/architecture' },
+          ]
+        },
+        {
+          text: 'Reference',
+          items: [
+            { text: 'Pipelines', link: '/pipelines' },
+            { text: 'Samplers', link: '/samplers' },
+            { text: 'Future Architectures', link: '/future-architectures' },
+          ]
+        },
+      ],
+
+      socialLinks: [
+        { icon: 'github', link: 'https://github.com/rhi-zone/sketchpad' }
+      ],
+
+      search: {
+        provider: 'local'
       },
-      {
-        text: 'Reference',
-        items: [
-          { text: 'Pipelines', link: '/pipelines' },
-          { text: 'Samplers', link: '/samplers' },
-          { text: 'Future Architectures', link: '/future-architectures' },
-        ]
+
+      editLink: {
+        pattern: 'https://github.com/rhi-zone/sketchpad/edit/master/docs/:path',
+        text: 'Edit this page on GitHub'
       },
-    ],
-
-    socialLinks: [
-      { icon: 'github', link: 'https://github.com/rhi-zone/sketchpad' }
-    ],
-
-    search: {
-      provider: 'local'
     },
-  },
-})
+
+    vite: {
+      optimizeDeps: {
+        include: ['mermaid'],
+      },
+    },
+  }),
+)
