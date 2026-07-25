@@ -41,3 +41,6 @@ memmap2 = "0.9"
 regex = "1.12"
 safetensors = "0.7"
 thiserror = "2.0"
+
+[profile.dev]
+debug = 0
