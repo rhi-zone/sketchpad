@@ -4,7 +4,7 @@ Custom GPU kernels for 3D convolution, optimized for video model inference (3D V
 
 ## Overview
 
-The `burn-models-cubecl` crate provides two Conv3d kernel implementations:
+The `rhi-sketchpad-cubecl` crate provides two Conv3d kernel implementations:
 
 1. **Simple kernel** (`conv3d`) - Direct implementation for NCTHW (channels-first) layout
 2. **Optimized kernel** (`conv3d_nthwc`) - Vectorized implementation for NTHWC (channels-last) layout
@@ -54,7 +54,7 @@ The im2col approach is O(n³) in spatial dimensions and becomes prohibitively sl
 - **Best for**: Small tensors, memory-constrained scenarios, NCTHW pipelines
 
 ```rust
-use burn_models_cubecl::{conv3d, Conv3dOptions, Layout};
+use rhi_sketchpad_cubecl::{conv3d, Conv3dOptions, Layout};
 
 let output = conv3d::<CudaRuntime>(
     input,   // [batch, channels, time, height, width]
@@ -81,7 +81,7 @@ let output = conv3d::<CudaRuntime>(
 - **Best for**: Large tensors where speed is priority, NTHWC pipelines
 
 ```rust
-use burn_models_cubecl::{conv3d_nthwc, Conv3dOptimizedOptions};
+use rhi_sketchpad_cubecl::{conv3d_nthwc, Conv3dOptimizedOptions};
 
 let output = conv3d_nthwc::<CudaRuntime>(
     input,   // [batch, time, height, width, channels]
@@ -141,7 +141,7 @@ The benchmarks show optimized is faster even with copy overhead, but if you're m
 
 ```bash
 # Requires CUDA
-cargo bench -p burn-models-cubecl --features cuda --bench conv3d
+cargo bench -p rhi-sketchpad-cubecl --features cuda --bench conv3d
 ```
 
 ## Supported Backends

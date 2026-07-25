@@ -368,7 +368,7 @@ CubeCL direct kernel vs im2col+matmul reference implementation:
 
 **Conclusion:** CubeCL kernel is **orders of magnitude faster** - the im2col implementation should be replaced.
 
-Run benchmarks: `cargo bench -p burn-models-cubecl --features cuda --bench conv3d`
+Run benchmarks: `cargo bench -p rhi-sketchpad-cubecl --features cuda --bench conv3d`
 
 ### Architecture
 
@@ -397,7 +397,7 @@ Our CubeCL Conv3d kernel:
    ```
 
 2. **Integration path** - Conv kernels live in burn-cubecl itself
-   - Options: contribute upstream OR create burn-models-cubecl crate
+   - Options: contribute upstream OR create rhi-sketchpad-cubecl crate
    - Need to understand backend trait registration
 
 3. **cubek crate** - High-level GEMM-based convolution components
@@ -462,9 +462,9 @@ fn conv3d_kernel<E: Numeric>(
 - Hardware-specific (needs CMMA)
 - Biggest perf gains but most complex
 
-### Integration Decision: burn-models-cubecl crate
+### Integration Decision: rhi-sketchpad-cubecl crate
 
-**Chosen: Option B** - Create `burn-models-cubecl` crate
+**Chosen: Option B** - Create `rhi-sketchpad-cubecl` crate
 
 Rationale:
 - Full control over iteration speed
@@ -479,7 +479,7 @@ Trade-offs accepted:
 ### Crate Structure
 
 ```
-crates/burn-models-cubecl/
+crates/rhi-sketchpad-cubecl/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
@@ -493,7 +493,7 @@ crates/burn-models-cubecl/
 **Cargo.toml skeleton:**
 ```toml
 [package]
-name = "burn-models-cubecl"
+name = "rhi-sketchpad-cubecl"
 version = "0.1.0"
 edition.workspace = true
 
@@ -508,7 +508,7 @@ burn = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
-burn-models-core = { workspace = true }  # For im2col reference
+rhi-sketchpad-core = { workspace = true }  # For im2col reference
 
 [[bench]]
 name = "conv3d"

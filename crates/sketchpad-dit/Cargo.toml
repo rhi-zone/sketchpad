@@ -1,0 +1,16 @@
+[package]
+name = "sketchpad-dit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "DiT-based diffusion models (Flux, SD3, PixArt)"
+license.workspace = true
+
+[dependencies]
+burn.workspace = true
+sketchpad-core.workspace = true
+sketchpad-convert.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+burn-ndarray.workspace = true

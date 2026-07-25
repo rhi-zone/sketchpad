@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/burn-models",
-    "crates/burn-models-core",
-    "crates/burn-models-clip",
-    "crates/burn-models-vae",
-    "crates/burn-models-unet",
-    "crates/burn-models-samplers",
-    "crates/burn-models-convert",
-    "crates/burn-models-cli",
-    "crates/burn-models-llm",
-    "crates/burn-models-dit",
-    "crates/burn-models-cubecl",
+    "crates/sketchpad",
+    "crates/sketchpad-core",
+    "crates/sketchpad-clip",
+    "crates/sketchpad-vae",
+    "crates/sketchpad-unet",
+    "crates/sketchpad-samplers",
+    "crates/sketchpad-convert",
+    "crates/sketchpad-cli",
+    "crates/sketchpad-llm",
+    "crates/sketchpad-dit",
+    "crates/sketchpad-cubecl",
 ]
 
 [workspace.package]
@@ -21,15 +21,15 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Internal crates
-burn-models-core = { path = "crates/burn-models-core" }
-burn-models-clip = { path = "crates/burn-models-clip" }
-burn-models-vae = { path = "crates/burn-models-vae" }
-burn-models-unet = { path = "crates/burn-models-unet" }
-burn-models-samplers = { path = "crates/burn-models-samplers" }
-burn-models-convert = { path = "crates/burn-models-convert" }
-burn-models-llm = { path = "crates/burn-models-llm" }
-burn-models-dit = { path = "crates/burn-models-dit" }
-burn-models-cubecl = { path = "crates/burn-models-cubecl" }
+sketchpad-core = { path = "crates/sketchpad-core" }
+sketchpad-clip = { path = "crates/sketchpad-clip" }
+sketchpad-vae = { path = "crates/sketchpad-vae" }
+sketchpad-unet = { path = "crates/sketchpad-unet" }
+sketchpad-samplers = { path = "crates/sketchpad-samplers" }
+sketchpad-convert = { path = "crates/sketchpad-convert" }
+sketchpad-llm = { path = "crates/sketchpad-llm" }
+sketchpad-dit = { path = "crates/sketchpad-dit" }
+sketchpad-cubecl = { path = "crates/sketchpad-cubecl" }
 
 # External dependencies
 burn = "0.20.0-pre.6"
@@ -41,4 +41,3 @@ memmap2 = "0.9"
 regex = "1.12"
 safetensors = "0.7"
 thiserror = "2.0"
-

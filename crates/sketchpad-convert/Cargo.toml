@@ -1,0 +1,17 @@
+[package]
+name = "sketchpad-convert"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+burn.workspace = true
+sketchpad-core.workspace = true
+sketchpad-clip = { path = "../sketchpad-clip" }
+sketchpad-unet = { path = "../sketchpad-unet" }
+sketchpad-vae = { path = "../sketchpad-vae" }
+bytemuck.workspace = true
+half.workspace = true
+memmap2.workspace = true
+safetensors.workspace = true
+thiserror.workspace = true

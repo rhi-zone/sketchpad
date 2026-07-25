@@ -1,0 +1,19 @@
+[package]
+name = "sketchpad-unet"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# Enable CubeCL-accelerated kernels (GroupNorm+SiLU fusion, FlashAttention)
+cubecl = ["dep:sketchpad-cubecl", "dep:burn-cubecl"]
+
+[dependencies]
+burn.workspace = true
+sketchpad-core.workspace = true
+sketchpad-cubecl = { workspace = true, optional = true }
+burn-cubecl = { workspace = true, optional = true }
+
+[dev-dependencies]
+burn-ndarray.workspace = true

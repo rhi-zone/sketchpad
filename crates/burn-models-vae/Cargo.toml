@@ -1,9 +1,0 @@
-[package]
-name = "burn-models-vae"
-version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-burn.workspace = true
-burn-models-core.workspace = true

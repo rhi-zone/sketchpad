@@ -1,0 +1,27 @@
+[package]
+name = "sketchpad-llm"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "LLM implementations for burn-models"
+license.workspace = true
+
+[features]
+default = []
+serve = ["axum", "tokio"]
+
+[dependencies]
+sketchpad-core = { path = "../sketchpad-core" }
+sketchpad-convert = { path = "../sketchpad-convert" }
+burn = { workspace = true }
+thiserror = { workspace = true }
+tokenizers = "0.21"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Optional serve dependencies
+axum = { version = "0.7", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+
+[dev-dependencies]
+burn-ndarray = { workspace = true }

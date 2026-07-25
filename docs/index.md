@@ -28,7 +28,7 @@ let image = pipeline.generate("a photo of a cat", "", &SampleConfig::default());
 ### DiT Models
 
 ```rust
-use burn_models_dit::{Flux, FluxConfig};
+use rhi_sketchpad_dit::{Flux, FluxConfig};
 
 let config = FluxConfig::schnell();
 let (model, runtime) = config.init::<Backend>(&device);
@@ -38,7 +38,7 @@ let output = model.forward(latents, timestep, txt, img_ids, txt_ids, &runtime);
 ### Language Models
 
 ```rust
-use burn_models_llm::{Llama, LlamaConfig};
+use rhi_sketchpad_llm::{Llama, LlamaConfig};
 
 let config = LlamaConfig::llama3_8b();
 let (model, runtime) = config.init::<Backend>(&device);
@@ -50,14 +50,14 @@ let generated = model.generate(prompt_ids, &runtime, 100, 0.8);
 | Crate | Description |
 |-------|-------------|
 | `burn-models` | Main pipeline and high-level API |
-| `burn-models-core` | Core building blocks (attention, RoPE, quantization) |
-| `burn-models-unet` | UNet architecture for SD 1.x and SDXL |
-| `burn-models-dit` | DiT models (Flux, SD3, video generation) |
-| `burn-models-llm` | Language models (LLaMA, Mistral, Mamba) |
-| `burn-models-vae` | VAE encoder and decoder |
-| `burn-models-clip` | CLIP and OpenCLIP text encoders |
-| `burn-models-samplers` | Diffusion samplers (DPM++, Euler, etc.) |
-| `burn-models-convert` | Weight loading from safetensors |
+| `rhi-sketchpad-core` | Core building blocks (attention, RoPE, quantization) |
+| `rhi-sketchpad-unet` | UNet architecture for SD 1.x and SDXL |
+| `rhi-sketchpad-dit` | DiT models (Flux, SD3, video generation) |
+| `rhi-sketchpad-llm` | Language models (LLaMA, Mistral, Mamba) |
+| `rhi-sketchpad-vae` | VAE encoder and decoder |
+| `rhi-sketchpad-clip` | CLIP and OpenCLIP text encoders |
+| `rhi-sketchpad-samplers` | Diffusion samplers (DPM++, Euler, etc.) |
+| `rhi-sketchpad-convert` | Weight loading from safetensors |
 
 ## Installation
 

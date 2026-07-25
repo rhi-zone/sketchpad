@@ -1,5 +1,5 @@
 {
-  "name": "burn-models",
+  "name": "sketchpad",
   "private": true,
   "workspaces": [
     "docs"

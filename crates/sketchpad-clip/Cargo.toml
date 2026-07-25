@@ -1,0 +1,11 @@
+[package]
+name = "sketchpad-clip"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+burn.workspace = true
+sketchpad-core.workspace = true
+regex.workspace = true
+thiserror.workspace = true

@@ -23,6 +23,20 @@ ALWAYS NOTE THINGS DOWN. When you discover something important, write it immedia
 - Framework/library quirk discovered → add to relevant docs/ file
 - "I'll remember this" thought → you won't, write it down now
 
+## Commit Convention
+
+Use conventional commits: `type(scope): message`
+
+Types:
+- `feat` - New feature
+- `fix` - Bug fix
+- `refactor` - Code change that neither fixes a bug nor adds a feature
+- `docs` - Documentation only
+- `chore` - Maintenance (deps, CI, etc.)
+- `test` - Adding or updating tests
+
+Scope is optional but recommended for multi-crate repos.
+
 ## Negative Constraints
 
 Do not:
@@ -35,6 +49,9 @@ Do not:
 - **Return tuples from functions** - use structs with named fields. Tuples obscure meaning and cause ordering bugs. Only use tuples when names would be pure ceremony (e.g., `(x, y)` coordinates).
 - **Replace content when editing lists** - when adding to TODO.md or similar, extend existing content, don't replace sections.
 - **Mark as done prematurely** - if work is incomplete, note what remains in TODO.md.
+- Use path dependencies in Cargo.toml - causes clippy to stash changes across repos
+- Use `--no-verify` - fix the issue or fix the hook
+- Assume tools are missing - check if `nix develop` is available for the right environment
 
 ## Design Principles
 

@@ -1,10 +1,10 @@
 import { defineConfig } from 'vitepress'
 
 export default defineConfig({
-  title: 'burn-models',
+  title: 'sketchpad',
   description: 'Stable Diffusion inference in pure Rust with Burn',
 
-  base: '/burn-models/',
+  base: '/sketchpad/',
 
   themeConfig: {
     nav: [
@@ -33,7 +33,7 @@ export default defineConfig({
     ],
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/TODO/burn-models' }
+      { icon: 'github', link: 'https://github.com/rhi-zone/sketchpad' }
     ],
 
     search: {

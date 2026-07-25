@@ -1,4 +1,4 @@
-# burn-models
+# sketchpad
 
 Deep learning model inference in pure Rust using the [Burn](https://burn.dev) framework.
 
@@ -17,7 +17,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-burn-models = { version = "0.1", features = ["wgpu"] }
+rhi-sketchpad = { version = "0.1", features = ["wgpu"] }
 ```
 
 Available backend features:
@@ -31,7 +31,7 @@ Available backend features:
 ### Image Generation (Stable Diffusion)
 
 ```rust
-use burn_models::prelude::*;
+use rhi_sketchpad::prelude::*;
 
 // Load model and generate
 let pipeline = StableDiffusion1x::load("model.safetensors", &device)?;
@@ -41,7 +41,7 @@ let image = pipeline.generate("a sunset over mountains", "", &SampleConfig::defa
 ### DiT Models (Flux, SD3)
 
 ```rust
-use burn_models_dit::{Flux, FluxConfig};
+use rhi_sketchpad_dit::{Flux, FluxConfig};
 
 let config = FluxConfig::schnell();
 let (model, runtime) = config.init::<Backend>(&device);
@@ -52,7 +52,7 @@ let output = model.forward(latents, timestep, txt_embeds, img_ids, txt_ids, &run
 ### Language Models
 
 ```rust
-use burn_models_llm::{Llama, LlamaConfig};
+use rhi_sketchpad_llm::{Llama, LlamaConfig};
 
 let config = LlamaConfig::llama3_8b();
 let (model, runtime) = config.init::<Backend>(&device);
@@ -98,20 +98,20 @@ let generated = model.generate(prompt_ids, &runtime, 100, 0.8);
 ## Architecture
 
 ```
-burn-models/
-├── burn-models          # Main crate with pipelines
-├── burn-models-core     # Shared building blocks
-│   ├── attention        # Multi-head, flash, paged attention
-│   ├── rope             # Rotary position embeddings
-│   ├── quantization     # INT4/INT8/FP8 quantization
+sketchpad/
+├── rhi-sketchpad          # Main crate with pipelines
+├── rhi-sketchpad-core     # Shared building blocks
+│   ├── attention          # Multi-head, flash, paged attention
+│   ├── rope               # Rotary position embeddings
+│   ├── quantization       # INT4/INT8/FP8 quantization
 │   └── ...
-├── burn-models-clip     # CLIP/OpenCLIP text encoders
-├── burn-models-vae      # VAE encoder/decoder (2D, 3D)
-├── burn-models-unet     # UNet for SD 1.x/2.x/XL
-├── burn-models-dit      # DiT models (Flux, SD3, video)
-├── burn-models-llm      # Language models
-├── burn-models-samplers # Diffusion samplers
-└── burn-models-convert  # Safetensors weight loading
+├── rhi-sketchpad-clip     # CLIP/OpenCLIP text encoders
+├── rhi-sketchpad-vae      # VAE encoder/decoder (2D, 3D)
+├── rhi-sketchpad-unet     # UNet for SD 1.x/2.x/XL
+├── rhi-sketchpad-dit      # DiT models (Flux, SD3, video)
+├── rhi-sketchpad-llm      # Language models
+├── rhi-sketchpad-samplers # Diffusion samplers
+└── rhi-sketchpad-convert  # Safetensors weight loading
 ```
 
 ## Samplers
@@ -152,7 +152,7 @@ Load weights from safetensors format. Obtain weights from:
 
 ## Documentation
 
-See the [documentation site](https://docs.burn-models.dev) for detailed guides.
+See the [documentation site](https://rhi-zone.github.io/sketchpad) for detailed guides.
 
 ## License
 

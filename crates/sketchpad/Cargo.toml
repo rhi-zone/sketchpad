@@ -1,0 +1,33 @@
+[package]
+name = "sketchpad"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Model inference in pure Rust using the Burn deep learning framework"
+license.workspace = true
+keywords = ["ai", "machine-learning", "llm", "stable-diffusion", "image-generation"]
+categories = ["science", "multimedia::images"]
+
+[features]
+default = []
+# Backend features - use burn's own feature flags
+ndarray = ["burn/ndarray"]
+tch = ["burn/tch"]
+wgpu = ["burn/wgpu"]
+cuda = ["burn/cuda"]
+# CubeCL acceleration (flash attention for f16)
+cubecl = ["sketchpad-unet/cubecl", "sketchpad-cubecl", "burn-cubecl"]
+
+[dependencies]
+burn.workspace = true
+sketchpad-core.workspace = true
+sketchpad-clip.workspace = true
+sketchpad-vae.workspace = true
+sketchpad-unet.workspace = true
+sketchpad-samplers.workspace = true
+sketchpad-convert.workspace = true
+sketchpad-llm.workspace = true
+
+# Optional CubeCL dependencies
+sketchpad-cubecl = { workspace = true, optional = true }
+burn-cubecl = { workspace = true, optional = true }

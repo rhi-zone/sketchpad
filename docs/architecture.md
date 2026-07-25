@@ -3,21 +3,21 @@
 ## Crate Structure
 
 ```
-burn-models/
+sketchpad/
 ├── crates/
-│   ├── burn-models/          # Main library, re-exports everything
-│   ├── burn-models-core/     # Shared layers and utilities
-│   ├── burn-models-clip/     # Text encoders (CLIP, OpenCLIP)
-│   ├── burn-models-vae/      # Autoencoder (encoder + decoder)
-│   ├── burn-models-unet/     # UNet diffusion models (SD 1.x, SDXL)
-│   ├── burn-models-samplers/ # Diffusion samplers (DDIM, DPM++, Euler, etc.)
-│   └── burn-models-convert/  # Weight conversion from safetensors
+│   ├── sketchpad/          # Main library, re-exports everything
+│   ├── rhi-sketchpad-core/     # Shared layers and utilities
+│   ├── rhi-sketchpad-clip/     # Text encoders (CLIP, OpenCLIP)
+│   ├── rhi-sketchpad-vae/      # Autoencoder (encoder + decoder)
+│   ├── rhi-sketchpad-unet/     # UNet diffusion models (SD 1.x, SDXL)
+│   ├── rhi-sketchpad-samplers/ # Diffusion samplers (DDIM, DPM++, Euler, etc.)
+│   └── rhi-sketchpad-convert/  # Weight conversion from safetensors
 └── src/                     # CLI binary
 ```
 
 ## Module Breakdown
 
-### burn-models-core
+### rhi-sketchpad-core
 
 Shared building blocks:
 
@@ -29,7 +29,7 @@ Shared building blocks:
 - `linear.rs` - Linear layer helpers
 - `timestep.rs` - Timestep embeddings
 
-### burn-models-clip
+### rhi-sketchpad-clip
 
 Text encoding:
 
@@ -38,7 +38,7 @@ Text encoding:
 - `open_clip.rs` - OpenCLIP encoder (SDXL)
 - `embedder.rs` - Unified interface for single/dual encoders
 
-### burn-models-vae
+### rhi-sketchpad-vae
 
 Variational Autoencoder:
 
@@ -46,7 +46,7 @@ Variational Autoencoder:
 - `decoder.rs` - Latent → image
 - `autoencoder.rs` - Combined VAE
 
-### burn-models-unet
+### rhi-sketchpad-unet
 
 Diffusion backbone:
 
@@ -55,7 +55,7 @@ Diffusion backbone:
 - `unet_sdxl.rs` - SDXL UNet (larger, different architecture)
 - `conditioning.rs` - Conditioning types
 
-### burn-models-samplers
+### rhi-sketchpad-samplers
 
 Noise schedulers and samplers:
 
@@ -65,7 +65,7 @@ Noise schedulers and samplers:
 - `dpm.rs` - DPM++ variants
 - `euler.rs` - Euler/Euler ancestral
 
-### burn-models-convert
+### rhi-sketchpad-convert
 
 Weight conversion:
 

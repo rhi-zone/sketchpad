@@ -1,0 +1,17 @@
+[package]
+name = "sketchpad-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+cubecl = ["dep:sketchpad-cubecl", "dep:burn-cubecl"]
+
+[dependencies]
+burn.workspace = true
+sketchpad-cubecl = { workspace = true, optional = true }
+burn-cubecl = { workspace = true, optional = true }
+
+[dev-dependencies]
+burn-ndarray.workspace = true

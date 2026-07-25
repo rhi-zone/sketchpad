@@ -35,7 +35,7 @@ The sum overflows to Inf, then Inf/N = Inf, and subsequent operations produce Na
 [groupnorm] after normalize: nan=5242880/5242880                 # 100% NaN
 ```
 
-**Fix** (`crates/burn-models-core/src/groupnorm.rs`):
+**Fix** (`crates/rhi-sketchpad-core/src/groupnorm.rs`):
 
 Compute mean and variance in f32, then cast back to original dtype:
 ```rust
@@ -117,8 +117,8 @@ Also added `--debug=vae` flag to enable VAE debug output for diagnosing f16 issu
 **Status**: Partially mitigated. `--vae-clamp` adds clamping that helps prevent overflow. Full fix needs true f32 VAE computation.
 
 **Files Modified**:
-- `crates/burn-models-core/src/groupnorm.rs` - f32 computation + clamping
-- `crates/burn-models-vae/src/decoder.rs` - added `clamp_overflow` mode with per-layer clamping
+- `crates/rhi-sketchpad-core/src/groupnorm.rs` - f32 computation + clamping
+- `crates/rhi-sketchpad-vae/src/decoder.rs` - added `clamp_overflow` mode with per-layer clamping
 - `crates/burn-models-cli/src/main.rs` - added `--vae-clamp` and `--debug=vae` flags
 
 ---
@@ -199,7 +199,7 @@ knkLuminai_v10.safetensors: layer 11 Q nan=0/589824                # Valid ✓
 
 **Fixes**:
 
-1. **Use penultimate layer** (`crates/burn-models/src/pipeline/sdxl.rs`, `crates/burn-models-cli/src/main.rs`):
+1. **Use penultimate layer** (`crates/sketchpad/src/pipeline/sdxl.rs`, `crates/burn-models-cli/src/main.rs`):
 ```rust
 // Before (wrong - uses all 12 layers including potentially corrupted layer 11)
 let clip_hidden = self.clip_encoder.forward(token_tensor.clone());
@@ -208,7 +208,7 @@ let clip_hidden = self.clip_encoder.forward(token_tensor.clone());
 let clip_hidden = self.clip_encoder.forward_penultimate(token_tensor.clone());
 ```
 
-2. **VAE decode** (`crates/burn-models/src/pipeline/sdxl.rs`):
+2. **VAE decode** (`crates/sketchpad/src/pipeline/sdxl.rs`):
 ```rust
 // Before (wrong - double scaling, wrong range)
 pub fn decode(&self, latent: Tensor<B, 4>) -> Tensor<B, 4> {
@@ -233,7 +233,7 @@ let (open_clip_cond, pooled_cond) =
     open_clip_encoder.forward_with_pooled(pos_tensor.unsqueeze::<2>(), &[pos_eos_pos]);
 ```
 
-3. **Attention numerical stability** (`crates/burn-models-clip/src/attention.rs`):
+3. **Attention numerical stability** (`crates/rhi-sketchpad-clip/src/attention.rs`):
 ```rust
 // Changed causal mask from -inf to -1e9 for bf16 compatibility
 mask_data[i * max_seq_len + j] = -1e9;  // was f32::NEG_INFINITY
@@ -244,9 +244,9 @@ let attn = attn / attn_sum;
 ```
 
 **Files Modified**:
-- `crates/burn-models/src/pipeline/sdxl.rs` - VAE decode fix
+- `crates/sketchpad/src/pipeline/sdxl.rs` - VAE decode fix
 - `crates/burn-models-cli/src/main.rs` - Pooled embedding fix
-- `crates/burn-models-clip/src/attention.rs` - Numerical stability
+- `crates/rhi-sketchpad-clip/src/attention.rs` - Numerical stability
 
 **Prevention**:
 - Validate checkpoint weights on load - warn if NaN detected in text encoder
@@ -282,7 +282,7 @@ The cosine schedule produces completely different alpha_cumprod values at each t
 }
 ```
 
-**Fix** (`crates/burn-models-samplers/src/scheduler.rs`):
+**Fix** (`crates/rhi-sketchpad-samplers/src/scheduler.rs`):
 
 1. Added `scaled_linear` schedule (different from regular `linear`):
 ```rust
@@ -354,7 +354,7 @@ let latent_scaled = latent.clone() * c_in;
 let noise = unet.forward(latent_scaled, t, conditioning);
 ```
 
-**Files**: `crates/burn-models/src/pipeline/sd1x.rs`
+**Files**: `crates/sketchpad/src/pipeline/sd1x.rs`
 
 **Prevention**:
 - When implementing samplers, document the expected input/output formulation
@@ -391,7 +391,7 @@ let noise = unet.forward(latent_scaled, t, cond);
 latent = sampler.step(latent, noise_pred, step_idx);
 ```
 
-**Files**: `crates/burn-models/src/pipeline/sd1x.rs`
+**Files**: `crates/sketchpad/src/pipeline/sd1x.rs`
 
 **Prevention**:
 - Read ComfyUI source carefully - `model_input` in `calculate_denoised` is unscaled x
@@ -429,8 +429,8 @@ let timesteps = if sigma_schedule == SigmaSchedule::Normal {
 The conversion uses: `alpha_cumprod = 1 / (1 + sigma^2)`, then finds the closest match.
 
 **Files**:
-- `crates/burn-models-samplers/src/scheduler.rs` - Added `sigma_to_timestep()` method
-- `crates/burn-models/src/pipeline/sd1x.rs` - Use sigma-derived timesteps for non-Normal schedules
+- `crates/rhi-sketchpad-samplers/src/scheduler.rs` - Added `sigma_to_timestep()` method
+- `crates/sketchpad/src/pipeline/sd1x.rs` - Use sigma-derived timesteps for non-Normal schedules
 
 **Prevention**:
 - In k-diffusion/ComfyUI, the model wrapper converts sigma→timestep internally
@@ -484,7 +484,7 @@ We were missing `post_quant_conv`, which transforms the latent before decoding.
 2. Load `first_stage_model.post_quant_conv` weights in decoder loader
 3. Apply in `forward_raw()` before main decoder path
 
-**Files**: `crates/burn-models-vae/src/decoder.rs`, `crates/burn-models-convert/src/sd_loader.rs`
+**Files**: `crates/rhi-sketchpad-vae/src/decoder.rs`, `crates/rhi-sketchpad-convert/src/sd_loader.rs`
 
 **Prevention**:
 - When porting models, enumerate ALL layers in reference implementation
@@ -509,7 +509,7 @@ byte_chars.sort();  // Sort byte-level tokens
 pairs.sort_by_key(|&(_, rank)| rank);  // Sort BPE merges by rank
 ```
 
-**Files**: `crates/burn-models-clip/src/tokenizer.rs`
+**Files**: `crates/rhi-sketchpad-clip/src/tokenizer.rs`
 
 **Prevention**:
 - Never iterate HashMap/HashSet when order matters
@@ -533,7 +533,7 @@ The programmatic approach produced different token assignments than OpenAI's ori
 2. Added simple JSON parser (no serde dependency)
 3. Embed vocab in binary with `include_str!`
 
-**Files**: `crates/burn-models-clip/src/tokenizer.rs`, `crates/burn-models-clip/data/vocab.json`
+**Files**: `crates/rhi-sketchpad-clip/src/tokenizer.rs`, `crates/rhi-sketchpad-clip/data/vocab.json`
 
 **Verification**: Token IDs now match exactly:
 - "a</w>" = 320
@@ -570,7 +570,7 @@ let attn = attn.clone() / attn.clone().sum_dim(3);
 **Result**: Still NaN. Overflow happens in matmul, before softmax.
 
 **Solution**: Flash attention with f32 accumulation.
-- Implemented in `burn-models-unet/src/cubecl.rs`
+- Implemented in `rhi-sketchpad-unet/src/cubecl.rs`
 - `UNetCubeCL` type with `convert_unet()` function
 - Uses flash attention kernel with f32 accumulation internally
 - Wired to CLI with `--flash-attention` flag (enabled by default)
@@ -582,7 +582,7 @@ let attn = attn.clone() / attn.clone().sum_dim(3);
 4. Flash attention uses `cubek-attention` kernel with f32 accumulation
 
 **Files Modified**:
-- `crates/burn-models-unet/src/cubecl.rs` - UNet and block types with flash attention
+- `crates/rhi-sketchpad-unet/src/cubecl.rs` - UNet and block types with flash attention
 - `crates/burn-models-cli/src/main.rs` - Flash attention generation path
 - `crates/burn-models-cli/Cargo.toml` - Added cubecl feature
 
@@ -635,8 +635,8 @@ cargo run -p burn-models-cli --features cuda -- generate --model sd1x --precisio
 ```
 
 **Files**:
-- `crates/burn-models-unet/src/cubecl.rs` - CrossAttentionCubeCL with padding
-- `crates/burn-models-cubecl/src/attention.rs` - flash_attention wrapper
+- `crates/rhi-sketchpad-unet/src/cubecl.rs` - CrossAttentionCubeCL with padding
+- `crates/rhi-sketchpad-cubecl/src/attention.rs` - flash_attention wrapper
 
 **Future Work - How Existing Software Solves This**:
 
